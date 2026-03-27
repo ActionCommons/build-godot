@@ -1,3 +1,7 @@
+#
+# © 2026-present Action Commons (https://github.com/ActionCommons)
+#
+
 # This workflow will lint the entire codebase using the
 # `super-linter/super-linter` action.
 #
@@ -53,6 +57,7 @@ jobs:
           VALIDATE_ALL_CODEBASE: true
           VALIDATE_BIOME_FORMAT: false
           VALIDATE_BIOME_LINT: false
+          VALIDATE_GITHUB_ACTIONS: false
           VALIDATE_GITHUB_ACTIONS_ZIZMOR: false
           VALIDATE_JAVASCRIPT_ES: false
           VALIDATE_JSCPD: false

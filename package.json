@@ -1,7 +1,7 @@
 {
-  "name": "typescript-action",
-  "description": "GitHub Actions TypeScript template",
-  "version": "0.0.0",
+  "name": "build-godot",
+  "description": "GitHub Action to download and build the Godot game engine from source",
+  "version": "1.0.0",
   "author": "",
   "type": "module",
   "private": true,
@@ -14,7 +14,9 @@
     "url": "https://github.com/actions/typescript-action/issues"
   },
   "keywords": [
-    "actions"
+    "actions",
+    "godot",
+    "build"
   ],
   "exports": {
     ".": "./dist/index.js"
@@ -37,7 +39,11 @@
   },
   "license": "MIT",
   "dependencies": {
-    "@actions/core": "^3.0.0"
+    "@actions/core": "^3.0.0",
+    "@actions/exec": "^1.1.1",
+    "@actions/glob": "^0.5.0",
+    "@actions/tool-cache": "^2.0.1",
+    "adm-zip": "^0.5.16"
   },
   "devDependencies": {
     "@eslint/compat": "^2.0.2",
@@ -48,6 +54,7 @@
     "@rollup/plugin-commonjs": "^29.0.0",
     "@rollup/plugin-node-resolve": "^16.0.3",
     "@rollup/plugin-typescript": "^12.3.0",
+    "@types/adm-zip": "^0.5.5",
     "@types/jest": "^30.0.0",
     "@types/node": "^25.2.3",
     "@typescript-eslint/eslint-plugin": "^8.56.0",
@@ -65,5 +72,9 @@
   },
   "optionalDependencies": {
     "@rollup/rollup-linux-x64-gnu": "*"
+  },
+  "overrides": {
+    "minimatch": "3.1.4",
+    "undici": "6.24.0"
   }
 }

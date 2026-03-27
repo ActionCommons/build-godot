@@ -1,24 +1,81 @@
-name: The name of your action here
-description: Provide a description here
-author: Your name or organization here
+#
+# © 2026-present Action Commons (https://github.com/ActionCommons)
+#
+name: Build Godot
+description:
+  Downloads Godot source and builds it via SCons for one or more platforms
+author: Action Commons
 
-# Add your action's branding here. This will appear on the GitHub Marketplace.
 branding:
-  icon: heart
-  color: red
+  icon: box
+  color: blue
 
-# Define your inputs here.
 inputs:
-  milliseconds:
-    description: Your input description here
+  version:
+    description: >
+      Godot version to build, e.g. "4.4" or "3.6".
     required: true
-    default: '1000'
 
-# Define your outputs here.
+  flavor:
+    description: >
+      Release flavor, e.g. "stable", "dev1", "beta2", "rc1".
+    required: false
+    default: stable
+
+  directory:
+    description: >
+      Working directory for the build. Defaults to a freshly-created temporary
+      directory when left empty.
+    required: false
+    default: ''
+
+  timeout:
+    description: >
+      Wall-clock timeout in seconds after which the build process is terminated.
+      Set to 0 (or leave empty) for no timeout.
+    required: false
+    default: '0'
+
+  platform:
+    description: >
+      Target platform(s), comma- or newline-separated. Allowed: android, ios,
+      linuxbsd, macos, web, windows. A separate SCons invocation is run for each
+      platform × target combination.
+    required: true
+
+  target:
+    description: >
+      Build target(s), comma- or newline-separated. Allowed: editor,
+      template_debug, template_release. A separate SCons invocation is run for
+      each platform × target combination.
+    required: true
+
+  architecture:
+    description: >
+      Target CPU architecture passed as arch= to SCons. "auto" lets SCons detect
+      the host architecture. Allowed: auto, x86_32, x86_64, arm32, arm64, rv64,
+      ppc32, ppc64, wasm32.
+    required: false
+    default: auto
+
+  options:
+    description: >
+      Extra build options, comma- or newline-separated. Supported flags:
+        create_header_archive             – zip all *.h / *.hpp files after
+      build
+        debug_symbols=[yes|no]            – control debug-symbol inclusion
+        optimize=[speed_trace|speed|size|debug|none|custom]
+    required: false
+    default: ''
+
 outputs:
-  time:
-    description: Your output description here
+  directory:
+    description: Absolute path to the working directory used for the build.
+  header_archive:
+    description: >
+      Absolute path to the ZIP archive of header files (*.h / *.hpp). Only set
+      when "create_header_archive" is included in the options input.
 
 runs:
   using: node24
-  main: dist/index.js
+  main: dist/index.cjs
