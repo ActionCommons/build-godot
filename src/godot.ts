@@ -318,8 +318,9 @@ export async function spawnWithTimeout(
 }
 
 /**
- * Creates a ZIP archive containing every `*.h` and `*.hpp` file found
- * anywhere under `sourceDir`, preserving relative paths.
+ * Creates a ZIP archive containing every `*.glsl`, `*.h`, `*.hh`, `*.hpp`,
+ * `*.inc`, and `*.inl` file found anywhere under `sourceDir`, preserving
+ * relative paths.
  *
  * Uses a synchronous recursive directory walk (fs.readdirSync with
  * withFileTypes) instead of an async glob library. This is reliable even
@@ -343,7 +344,12 @@ export async function createHeaderArchive(sourceDir: string): Promise<string> {
         walkDir(fullPath)
       } else if (
         entry.isFile() &&
-        (entry.name.endsWith('.h') || entry.name.endsWith('.hpp'))
+        (entry.name.endsWith('.glsl') ||
+          entry.name.endsWith('.h') ||
+          entry.name.endsWith('.hh') ||
+          entry.name.endsWith('.hpp') ||
+          entry.name.endsWith('.inc') ||
+          entry.name.endsWith('.inl'))
       ) {
         headerFiles.push(fullPath)
       }
