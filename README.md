@@ -99,10 +99,10 @@ so the example above produces four builds.
 
 ## Outputs
 
-| Output           | Always set | Description                                                                                                          |
-| ---------------- | :--------: | -------------------------------------------------------------------------------------------------------------------- |
-| `directory`      |    Yes     | Absolute path to the working directory used for the build.                                                           |
-| `header_archive` |     No     | Absolute path to a ZIP of all `*.h` / `*.hpp` files. Only set when `create_header_archive` is included in `options`. |
+| Output           | Always set | Description                                                                                                                                                 |
+| ---------------- | :--------: | ----------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `directory`      |    Yes     | Absolute path to the working directory used for the build.                                                                                                  |
+| `header_archive` |     No     | Absolute path to a ZIP of all `*.glsl`, `*.h`, `*.hh`, `*.hpp`, `*.inc`, and `*.inl` files. Only set when `create_header_archive` is included in `options`. |
 
 ## Options
 
@@ -111,7 +111,7 @@ newline-separated:
 
 | Flag                                                       | Description                                                                                                                                                                                                                                              |
 | ---------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `create_header_archive`                                    | After the build completes, ZIP every `*.h` and `*.hpp` file found in the working directory and set the `header_archive` output.                                                                                                                          |
+| `create_header_archive`                                    | After the build completes, ZIP every `*.glsl`, `*.h`, `*.hh`, `*.hpp`, `*.inc`, and `*.inl` file found in the working directory and set the `header_archive` output.                                                                                     |
 | `debug_symbols=[yes\|no]`                                  | Control whether debug symbols are included in the compiled binaries. Passed directly as `debug_symbols=` to SCons.                                                                                                                                       |
 | `optimize=[speed_trace\|speed\|size\|debug\|none\|custom]` | Set the compiler optimisation level. Passed directly as `optimize=` to SCons. See the [Godot build tool docs](https://docs.godotengine.org/en/stable/contributing/development/compiling/introduction_to_the_buildsystem.html) for what each level means. |
 

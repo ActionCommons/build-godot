@@ -1,7 +1,7 @@
 #
 # © 2026-present Action Commons (https://github.com/ActionCommons)
 #
-name: Build Godot
+name: Build Godot by Action Commons
 description:
   Downloads Godot source and builds it via SCons for one or more platforms
 author: Action Commons
@@ -61,8 +61,8 @@ inputs:
   options:
     description: >
       Extra build options, comma- or newline-separated. Supported flags:
-        create_header_archive             – zip all *.h / *.hpp files after
-      build
+        create_header_archive             – zip all *.glsl, *.h, *.hh, *.hpp,
+        *.inc, *.inl files after build
         debug_symbols=[yes|no]            – control debug-symbol inclusion
         optimize=[speed_trace|speed|size|debug|none|custom]
     required: false
@@ -73,8 +73,9 @@ outputs:
     description: Absolute path to the working directory used for the build.
   header_archive:
     description: >
-      Absolute path to the ZIP archive of header files (*.h / *.hpp). Only set
-      when "create_header_archive" is included in the options input.
+      Absolute path to the ZIP archive of header files (*.glsl, *.h, *.hh,
+      *.hpp, *.inc, *.inl). Only set when "create_header_archive" is included in
+      the options input.
 
 runs:
   using: node24

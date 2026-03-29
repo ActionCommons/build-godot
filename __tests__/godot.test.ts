@@ -627,7 +627,7 @@ describe('createHeaderArchive', () => {
   })
 
   it('emits a warning and still writes the zip when no header files are found', async () => {
-    // Empty directory — no .h / .hpp files at any level.
+    // Empty directory — no *.glsl, *.h, *.hh, *.hpp, *.inc, and *.inl files at any level.
     fsReaddirSync.mockReturnValue([])
 
     await createHeaderArchive('/src')
