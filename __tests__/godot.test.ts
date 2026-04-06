@@ -197,6 +197,42 @@ describe('parseOptions', () => {
     expect(() => parseOptions('unknown_flag')).toThrow(/Unknown option/)
   })
 
+  it('parses generate_bundle=yes', () => {
+    expect(parseOptions('generate_bundle=yes')).toMatchObject({
+      generate_bundle: 'yes'
+    })
+  })
+
+  it('parses generate_bundle=no', () => {
+    expect(parseOptions('generate_bundle=no')).toMatchObject({
+      generate_bundle: 'no'
+    })
+  })
+
+  it('throws on invalid generate_bundle value', () => {
+    expect(() => parseOptions('generate_bundle=maybe')).toThrow(
+      /Invalid generate_bundle value/
+    )
+  })
+
+  it('parses ios_simulator=yes', () => {
+    expect(parseOptions('ios_simulator=yes')).toMatchObject({
+      ios_simulator: 'yes'
+    })
+  })
+
+  it('parses ios_simulator=no', () => {
+    expect(parseOptions('ios_simulator=no')).toMatchObject({
+      ios_simulator: 'no'
+    })
+  })
+
+  it('throws on invalid ios_simulator value', () => {
+    expect(() => parseOptions('ios_simulator=maybe')).toThrow(
+      /Invalid ios_simulator value/
+    )
+  })
+
   it('parses multiple options at once', () => {
     const opts = parseOptions(
       'create_header_archive,debug_symbols=yes,optimize=size'
@@ -253,7 +289,42 @@ describe('buildSconsArgs', () => {
     ).toContain('optimize=size')
   })
 
-  it('combines multiple options', () => {
+  it('includes generate_bundle when set', () => {
+    expect(
+      buildSconsArgs('ios', 'template_release', 'arm64', {
+        generate_bundle: 'yes'
+      })
+    ).toContain('generate_bundle=yes')
+  })
+
+  it('includes ios_simulator when set', () => {
+    expect(
+      buildSconsArgs('ios', 'template_debug', 'arm64', {
+        ios_simulator: 'yes'
+      })
+    ).toContain('ios_simulator=yes')
+  })
+
+  it('combines all options including generate_bundle and ios_simulator', () => {
+    expect(
+      buildSconsArgs('ios', 'template_debug', 'arm64', {
+        debug_symbols: 'yes',
+        optimize: 'size',
+        generate_bundle: 'yes',
+        ios_simulator: 'no'
+      })
+    ).toEqual([
+      'platform=ios',
+      'target=template_debug',
+      'arch=arm64',
+      'debug_symbols=yes',
+      'optimize=size',
+      'generate_bundle=yes',
+      'ios_simulator=no'
+    ])
+  })
+
+  it('combines multiple options for web platform', () => {
     expect(
       buildSconsArgs('web', 'template_release', 'wasm32', {
         debug_symbols: 'no',

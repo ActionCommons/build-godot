@@ -25536,9 +25536,6 @@ function requirePermessageDeflate () {
 
 	  #options = {}
 
-	  /** @type {number} */
-	  #maxDecompressedSize
-
 	  /** @type {boolean} */
 	  #aborted = false
 
@@ -25547,12 +25544,10 @@ function requirePermessageDeflate () {
 
 	  /**
 	   * @param {Map<string, string>} extensions
-	   * @param {{ maxDecompressedMessageSize?: number }} [options]
 	   */
-	  constructor (extensions, options = {}) {
+	  constructor (extensions) {
 	    this.#options.serverNoContextTakeover = extensions.has('server_no_context_takeover');
 	    this.#options.serverMaxWindowBits = extensions.get('server_max_window_bits');
-	    this.#maxDecompressedSize = options.maxDecompressedMessageSize ?? kDefaultMaxDecompressedSize;
 	  }
 
 	  decompress (chunk, fin, callback) {
@@ -25594,7 +25589,7 @@ function requirePermessageDeflate () {
 
 	        this.#inflate[kLength] += data.length;
 
-	        if (this.#inflate[kLength] > this.#maxDecompressedSize) {
+	        if (this.#inflate[kLength] > kDefaultMaxDecompressedSize) {
 	          this.#aborted = true;
 	          this.#inflate.removeAllListeners();
 	          this.#inflate.destroy();
@@ -25687,23 +25682,18 @@ function requireReceiver () {
 	  /** @type {Map<string, PerMessageDeflate>} */
 	  #extensions
 
-	  /** @type {{ maxDecompressedMessageSize?: number }} */
-	  #options
-
 	  /**
 	   * @param {import('./websocket').WebSocket} ws
 	   * @param {Map<string, string>|null} extensions
-	   * @param {{ maxDecompressedMessageSize?: number }} [options]
 	   */
-	  constructor (ws, extensions, options = {}) {
+	  constructor (ws, extensions) {
 	    super();
 
 	    this.ws = ws;
 	    this.#extensions = extensions == null ? new Map() : extensions;
-	    this.#options = options;
 
 	    if (this.#extensions.has('permessage-deflate')) {
-	      this.#extensions.set('permessage-deflate', new PerMessageDeflate(extensions, options));
+	      this.#extensions.set('permessage-deflate', new PerMessageDeflate(extensions));
 	    }
 	  }
 
@@ -26246,9 +26236,6 @@ function requireWebsocket () {
 	  /** @type {SendQueue} */
 	  #sendQueue
 
-	  /** @type {{ maxDecompressedMessageSize?: number }} */
-	  #options
-
 	  /**
 	   * @param {string} url
 	   * @param {string|string[]} protocols
@@ -26321,11 +26308,6 @@ function requireWebsocket () {
 
 	    // 10. Set this's url to urlRecord.
 	    this[kWebSocketURL] = new URL(urlRecord.href);
-
-	    // Store options for later use (e.g., maxDecompressedMessageSize)
-	    this.#options = {
-	      maxDecompressedMessageSize: options.maxDecompressedMessageSize
-	    };
 
 	    // 11. Let client be this's relevant settings object.
 	    const client = environmentSettingsObject.settingsObject;
@@ -26645,7 +26627,7 @@ function requireWebsocket () {
 	    // once this happens, the connection is open
 	    this[kResponse] = response;
 
-	    const parser = new ByteParser(this, parsedExtensions, this.#options);
+	    const parser = new ByteParser(this, parsedExtensions);
 	    parser.on('drain', onParserDrain);
 	    parser.on('error', onParserError.bind(this));
 
@@ -26748,19 +26730,6 @@ function requireWebsocket () {
 	  {
 	    key: 'headers',
 	    converter: webidl.nullableConverter(webidl.converters.HeadersInit)
-	  },
-	  {
-	    key: 'maxDecompressedMessageSize',
-	    converter: webidl.nullableConverter((V) => {
-	      V = webidl.converters['unsigned long long'](V);
-	      if (V <= 0) {
-	        throw webidl.errors.exception({
-	          header: 'WebSocket constructor',
-	          message: 'maxDecompressedMessageSize must be greater than 0'
-	        })
-	      }
-	      return V
-	    })
 	  }
 	]);
 
@@ -34262,7 +34231,11 @@ function requireUtils () {
 	            try {
 	                stat = self.fs.statSync(resolvedPath);
 	            } catch (e) {
-	                self.fs.mkdirSync(resolvedPath);
+	                if (e.message && e.message.startsWith('ENOENT')) {
+	                    self.fs.mkdirSync(resolvedPath);
+	                } else {
+	                    throw e;
+	                }
 	            }
 	            if (stat && stat.isFile()) throw Errors.FILE_IN_THE_WAY(`"${resolvedPath}"`);
 	        });
@@ -34521,10 +34494,9 @@ function requireUtils () {
 	};
 
 	Utils.readBigUInt64LE = function (/*Buffer*/ buffer, /*int*/ index) {
-	    var slice = Buffer.from(buffer.slice(index, index + 8));
-	    slice.swap64();
-
-	    return parseInt(`0x${slice.toString("hex")}`);
+	    const lo = buffer.readUInt32LE(index);
+	    const hi = buffer.readUInt32LE(index + 4);
+	    return hi * 0x100000000 + lo;
 	};
 
 	Utils.fromDOS2Date = function (val) {
@@ -34765,6 +34737,7 @@ function requireEntryHeader () {
 	            return Utils.fromDOS2Date(this.timeval);
 	        },
 	        set time(val) {
+	            val = new Date(val);
 	            this.timeval = Utils.fromDate2DOS(val);
 	        },
 
@@ -34887,6 +34860,8 @@ function requireEntryHeader () {
 	            _localHeader.version = data.readUInt16LE(Constants.LOCVER);
 	            // general purpose bit flag
 	            _localHeader.flags = data.readUInt16LE(Constants.LOCFLG);
+	            // desc flag
+	            _localHeader.flags_desc = (_localHeader.flags & Constants.FLG_DESC) > 0;
 	            // compression method
 	            _localHeader.method = data.readUInt16LE(Constants.LOCHOW);
 	            // modification time (2 bytes time, 2 bytes date)
@@ -35510,7 +35485,7 @@ function requireZipEntry () {
 
 	    function crc32OK(data) {
 	        // if bit 3 (0x08) of the general-purpose flags field is set, then the CRC-32 and file sizes are not known when the local header is written
-	        if (!_centralHeader.flags_desc) {
+	        if (!_centralHeader.flags_desc && !_centralHeader.localHeader.flags_desc) {
 	            if (Utils.crc32(data) !== _centralHeader.localHeader.crc) {
 	                return false;
 	            }
@@ -35666,7 +35641,7 @@ function requireZipEntry () {
 	    }
 
 	    function readUInt64LE(buffer, offset) {
-	        return (buffer.readUInt32LE(offset + 4) << 4) + buffer.readUInt32LE(offset);
+	        return Utils.readBigUInt64LE(buffer, offset);
 	    }
 
 	    function parseExtra(data) {
@@ -36434,7 +36409,7 @@ function requireAdmZip () {
 	    function fixPath(zipPath) {
 	        const { join, normalize, sep } = pth.posix;
 	        // convert windows file separators and normalize
-	        return join(".", normalize(sep + zipPath.split("\\").join(sep) + sep));
+	        return join(pth.isAbsolute(zipPath) ? "/": '.',  normalize(sep + zipPath.split("\\").join(sep) + sep));
 	    }
 
 	    function filenameFilter(filterfn) {
@@ -37379,9 +37354,24 @@ function parseOptions(input) {
             }
             options.optimize = val;
         }
+        else if (part.startsWith('generate_bundle=')) {
+            const val = part.slice('generate_bundle='.length);
+            if (val !== 'yes' && val !== 'no') {
+                throw new Error(`Invalid generate_bundle value: "${val}". Must be "yes" or "no".`);
+            }
+            options.generate_bundle = val;
+        }
+        else if (part.startsWith('ios_simulator=')) {
+            const val = part.slice('ios_simulator='.length);
+            if (val !== 'yes' && val !== 'no') {
+                throw new Error(`Invalid ios_simulator value: "${val}". Must be "yes" or "no".`);
+            }
+            options.ios_simulator = val;
+        }
         else {
             throw new Error(`Unknown option: "${part}". ` +
                 `Supported: create_header_archive, debug_symbols=[yes|no], ` +
+                `generate_bundle=[yes|no], ios_simulator=[yes|no], ` +
                 `optimize=[speed_trace|speed|size|debug|none|custom].`);
         }
     }
@@ -37410,6 +37400,12 @@ function buildSconsArgs(platform, target, architecture, options) {
     }
     if (options.optimize !== undefined) {
         args.push(`optimize=${options.optimize}`);
+    }
+    if (options.generate_bundle !== undefined) {
+        args.push(`generate_bundle=${options.generate_bundle}`);
+    }
+    if (options.ios_simulator !== undefined) {
+        args.push(`ios_simulator=${options.ios_simulator}`);
     }
     return args;
 }

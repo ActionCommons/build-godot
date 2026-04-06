@@ -1,7 +1,7 @@
 {
   "name": "build-godot",
   "description": "GitHub Action to download and build the Godot game engine from source",
-  "version": "1.0.1",
+  "version": "1.1.0",
   "author": "",
   "type": "module",
   "private": true,
@@ -74,7 +74,6 @@
     "@rollup/rollup-linux-x64-gnu": "*"
   },
   "overrides": {
-    "minimatch": "3.1.4",
-    "undici": "6.24.0"
+    "undici": "~6.24.0"
   }
 }

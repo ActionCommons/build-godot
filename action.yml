@@ -4,7 +4,7 @@
 name: Build Godot by Action Commons
 description:
   Downloads Godot source and builds it via SCons for one or more platforms
-author: Action Commons
+author: Action Commons (https://github.com/ActionCommons)
 
 branding:
   icon: box
@@ -64,6 +64,8 @@ inputs:
         create_header_archive             – zip all *.glsl, *.h, *.hh, *.hpp,
         *.inc, *.inl files after build
         debug_symbols=[yes|no]            – control debug-symbol inclusion
+        generate_bundle=[yes|no]          – generate a .app bundle (macos/ios)
+        ios_simulator=[yes|no]            – build for iOS Simulator (ios only)
         optimize=[speed_trace|speed|size|debug|none|custom]
     required: false
     default: ''

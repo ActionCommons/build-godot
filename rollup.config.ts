@@ -29,7 +29,7 @@ export default defineConfig({
   context: 'this',
 
   output: {
-    file: 'dist/index.cjs', // ← CHANGED FROM .js
+    file: 'dist/index.cjs',
     format: 'cjs',
     sourcemap: true
   },

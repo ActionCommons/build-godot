@@ -50,6 +50,22 @@ steps:
 A separate SCons invocation is run for every `platform` × `target` combination,
 so the example above produces four builds.
 
+### Build an iOS export template with simulator support
+
+```yaml
+- name: Build Godot iOS templates
+  id: godot
+  uses: ActionCommons/build-godot@v1
+  with:
+    version: '4.4'
+    platform: ios
+    target: template_release
+    architecture: arm64
+    options: |
+      generate_bundle=yes
+      ios_simulator=yes
+```
+
 ### Build with debug symbols and include a header archive
 
 ```yaml
@@ -113,6 +129,8 @@ newline-separated:
 | ---------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `create_header_archive`                                    | After the build completes, ZIP every `*.glsl`, `*.h`, `*.hh`, `*.hpp`, `*.inc`, and `*.inl` file found in the working directory and set the `header_archive` output.                                                                                     |
 | `debug_symbols=[yes\|no]`                                  | Control whether debug symbols are included in the compiled binaries. Passed directly as `debug_symbols=` to SCons.                                                                                                                                       |
+| `generate_bundle=[yes\|no]`                                | Generate a `.app` bundle after compilation. Relevant for `macos` and `ios` targets. Passed directly as `generate_bundle=` to SCons.                                                                                                                      |
+| `ios_simulator=[yes\|no]`                                  | Build for the iOS Simulator instead of a physical device. Only meaningful when `platform` is `ios`. Passed directly as `ios_simulator=` to SCons.                                                                                                        |
 | `optimize=[speed_trace\|speed\|size\|debug\|none\|custom]` | Set the compiler optimisation level. Passed directly as `optimize=` to SCons. See the [Godot build tool docs](https://docs.godotengine.org/en/stable/contributing/development/compiling/introduction_to_the_buildsystem.html) for what each level means. |
 
 ## How it works
