@@ -37379,9 +37379,24 @@ function parseOptions(input) {
             }
             options.optimize = val;
         }
+        else if (part.startsWith('generate_bundle=')) {
+            const val = part.slice('generate_bundle='.length);
+            if (val !== 'yes' && val !== 'no') {
+                throw new Error(`Invalid generate_bundle value: "${val}". Must be "yes" or "no".`);
+            }
+            options.generate_bundle = val;
+        }
+        else if (part.startsWith('ios_simulator=')) {
+            const val = part.slice('ios_simulator='.length);
+            if (val !== 'yes' && val !== 'no') {
+                throw new Error(`Invalid ios_simulator value: "${val}". Must be "yes" or "no".`);
+            }
+            options.ios_simulator = val;
+        }
         else {
             throw new Error(`Unknown option: "${part}". ` +
                 `Supported: create_header_archive, debug_symbols=[yes|no], ` +
+                `generate_bundle=[yes|no], ios_simulator=[yes|no], ` +
                 `optimize=[speed_trace|speed|size|debug|none|custom].`);
         }
     }
@@ -37410,6 +37425,12 @@ function buildSconsArgs(platform, target, architecture, options) {
     }
     if (options.optimize !== undefined) {
         args.push(`optimize=${options.optimize}`);
+    }
+    if (options.generate_bundle !== undefined) {
+        args.push(`generate_bundle=${options.generate_bundle}`);
+    }
+    if (options.ios_simulator !== undefined) {
+        args.push(`ios_simulator=${options.ios_simulator}`);
     }
     return args;
 }

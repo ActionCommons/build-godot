@@ -56,6 +56,10 @@ export interface SconsOptions {
   debug_symbols?: 'yes' | 'no'
   /** Pass optimize=<level> to SCons */
   optimize?: 'speed_trace' | 'speed' | 'size' | 'debug' | 'none' | 'custom'
+  /** Pass generate_bundle=yes|no to SCons (macOS / iOS .app bundle) */
+  generate_bundle?: 'yes' | 'no'
+  /** Pass ios_simulator=yes|no to SCons */
+  ios_simulator?: 'yes' | 'no'
 }
 
 // ── Pure helpers ─────────────────────────────────────────────────────────────
@@ -106,10 +110,27 @@ export function parseOptions(input: string): SconsOptions {
         )
       }
       options.optimize = val as SconsOptions['optimize']
+    } else if (part.startsWith('generate_bundle=')) {
+      const val = part.slice('generate_bundle='.length)
+      if (val !== 'yes' && val !== 'no') {
+        throw new Error(
+          `Invalid generate_bundle value: "${val}". Must be "yes" or "no".`
+        )
+      }
+      options.generate_bundle = val
+    } else if (part.startsWith('ios_simulator=')) {
+      const val = part.slice('ios_simulator='.length)
+      if (val !== 'yes' && val !== 'no') {
+        throw new Error(
+          `Invalid ios_simulator value: "${val}". Must be "yes" or "no".`
+        )
+      }
+      options.ios_simulator = val
     } else {
       throw new Error(
         `Unknown option: "${part}". ` +
           `Supported: create_header_archive, debug_symbols=[yes|no], ` +
+          `generate_bundle=[yes|no], ios_simulator=[yes|no], ` +
           `optimize=[speed_trace|speed|size|debug|none|custom].`
       )
     }
@@ -148,6 +169,12 @@ export function buildSconsArgs(
   }
   if (options.optimize !== undefined) {
     args.push(`optimize=${options.optimize}`)
+  }
+  if (options.generate_bundle !== undefined) {
+    args.push(`generate_bundle=${options.generate_bundle}`)
+  }
+  if (options.ios_simulator !== undefined) {
+    args.push(`ios_simulator=${options.ios_simulator}`)
   }
 
   return args

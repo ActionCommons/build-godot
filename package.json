@@ -1,7 +1,7 @@
 {
   "name": "build-godot",
   "description": "GitHub Action to download and build the Godot game engine from source",
-  "version": "1.0.1",
+  "version": "1.1.0",
   "author": "",
   "type": "module",
   "private": true,
