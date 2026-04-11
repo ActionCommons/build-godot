@@ -1,6 +1,7 @@
 #
 # © 2026-present Action Commons (https://github.com/ActionCommons)
 #
+
 name: Build Godot by Action Commons
 description:
   Downloads Godot source and builds it via SCons for one or more platforms
@@ -40,14 +41,14 @@ inputs:
     description: >
       Target platform(s), comma- or newline-separated. Allowed: android, ios,
       linuxbsd, macos, web, windows. A separate SCons invocation is run for each
-      platform × target combination.
+      platform - target combination.
     required: true
 
   target:
     description: >
       Build target(s), comma- or newline-separated. Allowed: editor,
       template_debug, template_release. A separate SCons invocation is run for
-      each platform × target combination.
+      each platform - target combination.
     required: true
 
   architecture:
@@ -61,11 +62,11 @@ inputs:
   options:
     description: >
       Extra build options, comma- or newline-separated. Supported flags:
-        create_header_archive             – zip all *.glsl, *.h, *.hh, *.hpp,
+        create_header_archive             - zip all *.glsl, *.h, *.hh, *.hpp,
         *.inc, *.inl files after build
-        debug_symbols=[yes|no]            – control debug-symbol inclusion
-        generate_bundle=[yes|no]          – generate a .app bundle (macos/ios)
-        ios_simulator=[yes|no]            – build for iOS Simulator (ios only)
+        debug_symbols=[yes|no]            - control debug-symbol inclusion
+        generate_bundle=[yes|no]          - generate a .app bundle (macos/ios)
+        ios_simulator=[yes|no]            - build for iOS Simulator (ios only)
         optimize=[speed_trace|speed|size|debug|none|custom]
     required: false
     default: ''
