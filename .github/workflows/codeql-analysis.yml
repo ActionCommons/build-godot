@@ -1,3 +1,7 @@
+#
+# © 2026-present Action Commons (https://github.com/ActionCommons)
+#
+
 name: CodeQL
 
 on:

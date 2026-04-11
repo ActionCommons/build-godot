@@ -1,3 +1,7 @@
+#
+# © 2026-present Action Commons (https://github.com/ActionCommons)
+#
+
 name: Continuous Integration
 
 on:
@@ -7,11 +11,13 @@ on:
   push:
     branches:
       - main
+  workflow_dispatch:
 
 permissions:
   contents: read
 
 jobs:
+  # Job 1: Unit Tests & 100% Coverage Verification
   test-typescript:
     name: TypeScript Tests
     runs-on: ubuntu-latest
@@ -44,21 +50,70 @@ jobs:
         id: npm-ci-test
         run: npm run ci-test
 
+      - name: Upload Test Coverage
+        uses: actions/upload-artifact@v7
+        with:
+          name: coverage-report
+          path: coverage/
+          retention-days: 14
+
+  # Job 2: Integration Tests (3 Essential Scenarios)
   test-action:
-    name: GitHub Actions Test
-    runs-on: ubuntu-latest
+    name: ${{ matrix.config.name }}
+    runs-on: ${{ matrix.config.runner }}
+    needs: test-typescript
+    strategy:
+      fail-fast: false
+      matrix:
+        config:
+          # 1. Standard Linux Editor Build (Baseline)
+          - name: Linux Editor
+            runner: ubuntu-latest
+            platform: linuxbsd
+            target: editor
+            version: '4.5'
+
+          # 2. Multi-Target Build (Verifies array parsing), Pre-release Flavor
+          - name: Multi-Target (Linux) Pre-release
+            runner: ubuntu-latest
+            platform: linuxbsd
+            target: 'template_debug, template_release'
+            version: '4.6'
+            flavor: 'dev6'
+
+          # 3. Multi-Target Header Archive Generation, Custom Directory & Timeout
+          #    iOS requires macOS — the SCons platform detector only exposes
+          #    "ios" when running on a Darwin host.
+          - name: Multi-Target iOS Header Generation with Custom Path & Timeout
+            runner: macos-latest
+            platform: ios
+            target: 'template_debug, template_release'
+            version: '4.6.1'
+            directory: './custom_godot_source'
+            timeout: '40' # 40 seconds
+            options: 'create_header_archive'
 
     steps:
       - name: Checkout
         id: checkout
         uses: actions/checkout@v6
 
-      - name: Test Local Action
-        id: test-action
+      - name: Run Godot Build Action
+        id: build
         uses: ./
         with:
-          milliseconds: 2000
+          version: ${{ matrix.config.version }}
+          platform: ${{ matrix.config.platform }}
+          target: ${{ matrix.config.target }}
+          flavor: ${{ matrix.config.flavor || 'stable' }}
+          architecture: ${{ matrix.config.architecture || 'auto' }}
+          options: ${{ matrix.config.options || '' }}
+          directory: ${{ matrix.config.directory || '' }}
+          timeout: ${{ matrix.config.timeout || '0' }}
 
-      - name: Print Output
-        id: output
-        run: echo "${{ steps.test-action.outputs.time }}"
+      - name: Verify Output
+        run: |
+          echo "Build directory: ${{ steps.build.outputs.directory }}"
+          if [[ "${{ matrix.config.options }}" == *"create_header_archive"* ]]; then
+            echo "Header archive: ${{ steps.build.outputs.header_archive }}"
+          fi

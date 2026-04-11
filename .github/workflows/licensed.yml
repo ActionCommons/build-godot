@@ -1,3 +1,7 @@
+#
+# © 2026-present Action Commons (https://github.com/ActionCommons)
+#
+
 # This workflow checks the statuses of cached dependencies used in this action
 # with the help of the Licensed tool. If any licenses are invalid or missing,
 # this workflow will fail. See: https://github.com/licensee/licensed
