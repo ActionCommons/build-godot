@@ -1,0 +1,6 @@
+#
+# © 2026-present Action Commons (https://github.com/ActionCommons)
+#
+
+# disable blank issue creation
+blank_issues_enabled: false
