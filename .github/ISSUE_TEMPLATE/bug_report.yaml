@@ -1,0 +1,67 @@
+#
+# © 2026-present Action Commons (https://github.com/ActionCommons)
+#
+
+name: 🐞 Bug
+description: File a bug/issue
+title: '🐞 '
+type: bug
+body:
+  - type: checkboxes
+    attributes:
+      label: Is there an existing issue for this?
+      description:
+        Please search to see if an issue already exists for the bug you
+        encountered.
+      options:
+        - label: I have searched the existing open and closed issues
+          required: true
+        - label: I have searched the discussions
+          required: true
+        - label: I have starred the repository
+          required: true
+  - type: textarea
+    attributes:
+      label: Current Behavior
+      description: A clear and concise description of what the bug is.
+    validations:
+      required: true
+  - type: textarea
+    attributes:
+      label: Expected Behavior
+      description: A concise description of what you expected to happen.
+    validations:
+      required: true
+  - type: textarea
+    attributes:
+      label: Steps To Reproduce
+      description: Steps to reproduce the behavior.
+      placeholder: |
+        1. '...'
+        2. '...'
+        3. '...'
+    validations:
+      required: false
+  - type: dropdown
+    id: action_version
+    attributes:
+      label: Action Version
+      description: What version of the action are you using?
+      options:
+        - 1.2.0
+        - 1.1.0
+        - 1.0.1
+        - 1.0.0
+        - Other
+      default: 0
+    validations:
+      required: true
+  - type: textarea
+    attributes:
+      label: Anything else?
+      description: |
+        Links? References? Anything that will give more context about the issue you are encountering!
+
+        Tip: You can attach images or log files by clicking this area to highlight it and then dragging files in.
+    validations:
+      required: false
