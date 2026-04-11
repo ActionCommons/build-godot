@@ -166,3 +166,84 @@ INPUT_ARCHITECTURE=auto
 INPUT_OPTIONS=
 INPUT_TIMEOUT=0
 ```
+
+## Other useful `npm` commands
+
+### Setup packages defined in the `package.json` file:
+
+```bash
+npm install
+```
+
+### Update packages to the latest version allowed by the version range specified in the `package.json` file:
+
+```bash
+npm update
+```
+
+### Check for vulnerabilities:
+
+```bash
+npm audit
+```
+
+### Check the registry to see if any of the installed packages have newer versions available:
+
+```bash
+npm outdated
+```
+
+### Remove "extraneous" packages—those that are installed in node_modules but no longer listed in package.json:
+
+```bash
+npm prune
+```
+
+### Simplify the dependency tree by moving duplicated nested dependencies further up the hierarchy:
+
+```bash
+npm dedupe
+```
+
+### Display an ASCII tree of all installed packages and their dependencies:
+
+```bash
+npm list (or npm ls)
+npm ls -g --depth=0   # to see only top-level global packages
+```
+
+### Check why a specific package is installed by visualizing the dependency chain leading to it:
+
+```bash
+npm explain <package> (formerly npm why)
+```
+
+### Run a series of diagnostic tests to ensure the npm installation and environment (like the cache and registry access) are working correctly:
+
+```bash
+npm doctor
+```
+
+### Clear the internal npm cache, which can resolve "ghost" installation errors:
+
+```bash
+npm cache clean --force
+```
+
+### Perform a "clean" install by deleting node_modules and strictly following the package-lock.json file (Designed for CI environments):
+
+```bash
+npm ci
+```
+
+### Creates a symbolic link for a package being developed locally, allowing use in another project as if it were published:
+
+```bash
+npm link
+```
+
+### Print detailed metadata about a package from the registry without installing it, such as available versions or its README:
+
+```bash
+npm view <package-name>
+```
