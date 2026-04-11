@@ -210,8 +210,8 @@ npm prune
 
 ### Simplify the dependency tree
 
-Simplify the dependency tree by moving duplicated nested dependencies further
-up the hierarchy.
+Simplify the dependency tree by moving duplicated nested dependencies further up
+the hierarchy.
 
 ```bash
 npm dedupe
@@ -272,8 +272,8 @@ npm link
 
 ### Print detailed metadata about a package
 
-Print detailed metadata about a package from the registry without installing
-it, such as available versions or its documentation.
+Print detailed metadata about a package from the registry without installing it,
+such as available versions or its documentation.
 
 ```bash
 npm view <package-name>
