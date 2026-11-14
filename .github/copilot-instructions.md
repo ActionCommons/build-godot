@@ -21,6 +21,8 @@ it is generated from.
 | `.vscode/`           | Visual Studio Code Configuration                         |
 | `badges/`            | Badges for readme                                        |
 | `dist/`              | Generated JavaScript Code                                |
+| `docs/`              | Contributor Documentation                                |
+| `script/`            | Release Helper Script                                    |
 | `src/`               | TypeScript Source Code                                   |
 | `.env.example`       | Environment Variables Example for `@github/local-action` |
 | `.licensed.yml`      | Licensed Configuration                                   |
@@ -36,6 +38,7 @@ it is generated from.
 | `package.json`       | NPM Package Configuration                                |
 | `README.md`          | Project Documentation                                    |
 | `rollup.config.ts`   | Rollup Bundler Configuration                             |
+| `stryker.config.mjs` | Stryker Mutation Testing Configuration                   |
 | `tsconfig.json`      | TypeScript Configuration                                 |
 
 ## Environment Setup

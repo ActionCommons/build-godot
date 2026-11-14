@@ -8,6 +8,7 @@ import * as os from 'node:os'
 import * as path from 'node:path'
 
 import {
+  GODOT3_MIN_TESTED_MINOR,
   VALID_ARCHITECTURES,
   VALID_PLATFORMS,
   VALID_TARGETS,
@@ -15,8 +16,12 @@ import {
   downloadAndExtract,
   parseMultiInput,
   parseOptions,
+  parseTimeout,
+  parseVersion,
   runBuild,
-  setupScons
+  setupScons,
+  validateFlavor,
+  validateInputsForMajor
 } from './godot.js'
 
 /**
@@ -35,6 +40,19 @@ export async function run(): Promise<void> {
     const targetInput = core.getInput('target', { required: true })
     const architectureInput = core.getInput('architecture') || 'auto'
     const optionsInput = core.getInput('options') || ''
+
+    // ── Detect Godot major version (before any download) ───────────────────
+    const { major, minor } = parseVersion(version)
+    core.info(`Detected Godot major version: ${major}.x`)
+    if (major === 3 && minor < GODOT3_MIN_TESTED_MINOR) {
+      core.warning(
+        `Godot ${version} is older than 3.${GODOT3_MIN_TESTED_MINOR}, the ` +
+          `oldest 3.x release this action is tested with. The build may ` +
+          `fail with the toolchains available on current runners.`
+      )
+    }
+
+    validateFlavor(flavor)
 
     // ── Validate & parse multi-value inputs ────────────────────────────────
     const platforms = parseMultiInput(platformInput)
@@ -76,16 +94,19 @@ export async function run(): Promise<void> {
       )
     }
 
-    const timeoutSeconds = parseInt(timeoutInput, 10)
-    if (isNaN(timeoutSeconds) || timeoutSeconds < 0) {
-      throw new Error(
-        `Invalid timeout value: "${timeoutInput}". ` +
-          `Must be a non-negative integer (0 = no timeout).`
-      )
-    }
+    const timeoutSeconds = parseTimeout(timeoutInput)
 
     // parseOptions throws on invalid option tokens
     const options = parseOptions(optionsInput)
+
+    // Reject inputs that cannot be expressed for the detected major version
+    validateInputsForMajor(
+      major,
+      platforms,
+      targets,
+      architectureInput,
+      options
+    )
 
     // ── Resolve working directory ──────────────────────────────────────────
     const directory = directoryInput
@@ -103,7 +124,7 @@ export async function run(): Promise<void> {
     const sourceDir = await downloadAndExtract(version, flavor, directory)
 
     // ── Set up SCons ───────────────────────────────────────────────────────
-    await setupScons()
+    await setupScons(major)
 
     // ── Header Archiving Logic ─────────────────────────────────────────────
     let headerArchiveCreated = false
@@ -124,12 +145,15 @@ export async function run(): Promise<void> {
       architectureInput,
       options,
       timeoutSeconds,
-      archiveHeaders
+      archiveHeaders,
+      major
     )
 
     // Final check for normal completion
     await archiveHeaders()
   } catch (error) {
-    if (error instanceof Error) core.setFailed(error.message)
+    // Anything thrown must fail the step; a non-Error value (e.g. a raw
+    // string from a library) previously let the step succeed silently.
+    core.setFailed(error instanceof Error ? error.message : String(error))
   }
 }

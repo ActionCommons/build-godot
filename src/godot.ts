@@ -49,6 +49,107 @@ export type Platform = (typeof VALID_PLATFORMS)[number]
 export type Target = (typeof VALID_TARGETS)[number]
 export type Architecture = (typeof VALID_ARCHITECTURES)[number]
 
+/** Godot major versions this action knows how to build. */
+export const SUPPORTED_MAJORS = [3, 4] as const
+export type GodotMajor = (typeof SUPPORTED_MAJORS)[number]
+
+// ── Godot 3.x translation tables ─────────────────────────────────────────────
+//
+// The action's public vocabulary is the Godot 4.x one. When building a 3.x
+// tree, the inputs are translated into the SCons arguments Godot 3 expects.
+
+/** 4.x platform name → 3.x SCons `platform=` value. */
+export const GODOT3_PLATFORMS: Readonly<Record<Platform, string>> = {
+  android: 'android',
+  ios: 'iphone',
+  linuxbsd: 'x11',
+  macos: 'osx',
+  web: 'javascript',
+  windows: 'windows'
+}
+
+/** 4.x target name → 3.x `tools=` + `target=` SCons arguments. */
+export const GODOT3_TARGETS: Readonly<Record<Target, readonly string[]>> = {
+  editor: ['tools=yes', 'target=release_debug'],
+  template_debug: ['tools=no', 'target=release_debug'],
+  template_release: ['tools=no', 'target=release']
+}
+
+/**
+ * 4.x architecture → 3.x SCons argument, per 4.x platform name.
+ * Godot 3 has no universal `arch=` flag: x86 desktop builds use `bits=`,
+ * Android uses `android_arch=`, and only macOS / iOS accept `arch=`.
+ * Architectures missing from a platform's map are rejected for 3.x.
+ */
+export const GODOT3_ARCHITECTURES: Readonly<
+  Record<Platform, Readonly<Partial<Record<Architecture, string>>>>
+> = {
+  android: {
+    x86_32: 'android_arch=x86',
+    x86_64: 'android_arch=x86_64',
+    arm32: 'android_arch=armv7',
+    arm64: 'android_arch=arm64v8'
+  },
+  ios: { arm64: 'arch=arm64' },
+  linuxbsd: { x86_32: 'bits=32', x86_64: 'bits=64' },
+  macos: { x86_64: 'arch=x86_64', arm64: 'arch=arm64' },
+  web: {},
+  windows: { x86_32: 'bits=32', x86_64: 'bits=64' }
+}
+
+/** `optimize=` values understood by the Godot 3.x build system. */
+export const GODOT3_OPTIMIZE_VALUES = ['speed', 'size', 'none'] as const
+
+/** SCons version range to install when building Godot 3.x. */
+export const GODOT3_SCONS_REQUIREMENT = 'scons<4.8'
+
+/** Oldest Godot 3.x minor version this action is tested against. */
+export const GODOT3_MIN_TESTED_MINOR = 5
+
+/**
+ * Architectures accepted by the Godot 4.x SCons platform detectors
+ * (`supported_arches` in each `platform/<name>/detect.py`). Anything else
+ * fails inside SCons, so it is rejected before the download.
+ */
+export const GODOT4_ARCHITECTURES: Readonly<
+  Record<Platform, readonly Architecture[]>
+> = {
+  android: ['x86_32', 'x86_64', 'arm32', 'arm64'],
+  ios: ['x86_64', 'arm64'],
+  linuxbsd: ['x86_32', 'x86_64', 'arm32', 'arm64', 'rv64', 'ppc32', 'ppc64'],
+  macos: ['x86_64', 'arm64'],
+  web: ['wasm32'],
+  windows: ['x86_32', 'x86_64', 'arm32', 'arm64']
+}
+
+/**
+ * Platforms that have no editor build, per major version. Godot 3.x has no
+ * Android or iOS editor; Godot 4.x has an Android editor but no iOS editor.
+ */
+export const EDITOR_UNSUPPORTED_PLATFORMS: Readonly<
+  Record<GodotMajor, readonly Platform[]>
+> = {
+  3: ['android', 'ios'],
+  4: ['ios']
+}
+
+/** Platform-specific options and the platforms they may be used with. */
+export const OPTION_PLATFORMS: Readonly<
+  Record<'generate_bundle' | 'ios_simulator', readonly Platform[]>
+> = {
+  generate_bundle: ['macos', 'ios'],
+  ios_simulator: ['ios']
+}
+
+/**
+ * Largest timeout (in seconds) that fits in a Node.js timer. setTimeout
+ * silently fires after 1 ms for delays above 2^31 - 1 milliseconds.
+ */
+export const MAX_TIMEOUT_SECONDS = Math.floor(2147483647 / 1000)
+
+/** Release flavors published on godotengine/godot-builds. */
+export const FLAVOR_PATTERN = /^(stable|(dev|alpha|beta|rc)[1-9]\d*)$/
+
 export interface SconsOptions {
   /** Zip all header files after the build */
   create_header_archive?: boolean
@@ -66,13 +167,52 @@ export interface SconsOptions {
 
 /**
  * Splits a comma- or newline-separated string into an array of trimmed,
- * non-empty tokens.
+ * non-empty, unique tokens (first occurrence wins, order preserved).
+ * Deduplication prevents e.g. `linuxbsd, linuxbsd` from building twice.
  */
 export function parseMultiInput(input: string): string[] {
-  return input
+  const tokens = input
     .split(/[\n,]+/)
     .map((s) => s.trim())
     .filter((s) => s.length > 0)
+  return [...new Set(tokens)]
+}
+
+/**
+ * Parses the `timeout` input (seconds). Only plain non-negative integers are
+ * accepted: `parseInt` would silently turn `"10abc"` into 10 and `"1.5"`
+ * into 1. Values above {@link MAX_TIMEOUT_SECONDS} are rejected because they
+ * overflow Node's timer and would fire almost immediately.
+ */
+export function parseTimeout(input: string): number {
+  if (!/^\d+$/.test(input)) {
+    throw new Error(
+      `Invalid timeout value: "${input}". ` +
+        `Must be a non-negative integer number of seconds (0 = no timeout).`
+    )
+  }
+  const seconds = parseInt(input, 10)
+  if (seconds > MAX_TIMEOUT_SECONDS) {
+    throw new Error(
+      `Invalid timeout value: "${input}". ` +
+        `Must not exceed ${MAX_TIMEOUT_SECONDS} seconds (about 24.8 days).`
+    )
+  }
+  return seconds
+}
+
+/**
+ * Validates the `flavor` input against the naming used by
+ * godotengine/godot-builds (`stable`, `devN`, `alphaN`, `betaN`, `rcN`), so
+ * typos fail immediately instead of as a 404 during download.
+ */
+export function validateFlavor(flavor: string): void {
+  if (!FLAVOR_PATTERN.test(flavor)) {
+    throw new Error(
+      `Invalid flavor: "${flavor}". ` +
+        `Must be "stable" or one of devN, alphaN, betaN, rcN (e.g. "rc1").`
+    )
+  }
 }
 
 /**
@@ -81,7 +221,17 @@ export function parseMultiInput(input: string): string[] {
  */
 export function parseOptions(input: string): SconsOptions {
   const options: SconsOptions = {}
-  if (!input || !input.trim()) return options
+
+  // Rejects the same option given twice with different values, e.g.
+  // "optimize=speed, optimize=size" (identical repeats are deduplicated).
+  const assertUnset = (key: keyof SconsOptions, val: string): void => {
+    const existing = options[key]
+    if (existing !== undefined) {
+      throw new Error(
+        `Conflicting values for option "${key}": "${existing}" and "${val}".`
+      )
+    }
+  }
 
   for (const part of parseMultiInput(input)) {
     if (part === 'create_header_archive') {
@@ -93,6 +243,7 @@ export function parseOptions(input: string): SconsOptions {
           `Invalid debug_symbols value: "${val}". Must be "yes" or "no".`
         )
       }
+      assertUnset('debug_symbols', val)
       options.debug_symbols = val
     } else if (part.startsWith('optimize=')) {
       const val = part.slice('optimize='.length)
@@ -109,6 +260,7 @@ export function parseOptions(input: string): SconsOptions {
           `Invalid optimize value: "${val}". Must be one of: ${valid.join(', ')}.`
         )
       }
+      assertUnset('optimize', val)
       options.optimize = val as SconsOptions['optimize']
     } else if (part.startsWith('generate_bundle=')) {
       const val = part.slice('generate_bundle='.length)
@@ -117,6 +269,7 @@ export function parseOptions(input: string): SconsOptions {
           `Invalid generate_bundle value: "${val}". Must be "yes" or "no".`
         )
       }
+      assertUnset('generate_bundle', val)
       options.generate_bundle = val
     } else if (part.startsWith('ios_simulator=')) {
       const val = part.slice('ios_simulator='.length)
@@ -125,6 +278,7 @@ export function parseOptions(input: string): SconsOptions {
           `Invalid ios_simulator value: "${val}". Must be "yes" or "no".`
         )
       }
+      assertUnset('ios_simulator', val)
       options.ios_simulator = val
     } else {
       throw new Error(
@@ -150,19 +304,189 @@ export function buildDownloadUrl(version: string, flavor: string): string {
   return `https://github.com/godotengine/godot-builds/releases/download/${tag}/godot-${tag}.tar.xz`
 }
 
+/** Components of a parsed `version` input. */
+export interface GodotVersion {
+  major: GodotMajor
+  minor: number
+  patch?: number
+}
+
+/**
+ * Parses the `version` input (e.g. `"3.6"`, `"4.6.1"`) into its components.
+ *
+ * Accepts `MAJOR.MINOR` or `MAJOR.MINOR.PATCH` without leading zeros. A `.0`
+ * patch is rejected because godot-builds tags omit it (`4.4`, not `4.4.0`),
+ * so the download would 404. Throws on malformed input or an unsupported
+ * major version.
+ */
+export function parseVersion(version: string): GodotVersion {
+  const match = /^(0|[1-9]\d*)\.(0|[1-9]\d*)(?:\.(0|[1-9]\d*))?$/.exec(version)
+  if (!match) {
+    throw new Error(
+      `Invalid version: "${version}". ` +
+        `Expected MAJOR.MINOR or MAJOR.MINOR.PATCH such as "4.4" or "3.5.3".`
+    )
+  }
+
+  if (match[3] === '0') {
+    throw new Error(
+      `Invalid version: "${version}". ` +
+        `Godot release tags omit a ".0" patch; use "${match[1]}.${match[2]}".`
+    )
+  }
+
+  const major = parseInt(match[1], 10)
+  if (!SUPPORTED_MAJORS.includes(major as GodotMajor)) {
+    throw new Error(
+      `Unsupported Godot major version: ${major} (from "${version}"). ` +
+        `Supported major versions: ${SUPPORTED_MAJORS.join(', ')}.`
+    )
+  }
+
+  return {
+    major: major as GodotMajor,
+    minor: parseInt(match[2], 10),
+    ...(match[3] !== undefined && { patch: parseInt(match[3], 10) })
+  }
+}
+
+/** Returns only the major component of {@link parseVersion}. */
+export function parseMajorVersion(version: string): GodotMajor {
+  return parseVersion(version).major
+}
+
+/**
+ * Resolves the SCons architecture argument for a platform and major version.
+ *
+ * Returns `undefined` for `auto` (no argument; SCons detects the host).
+ * Throws when the platform cannot be built for that architecture. This is
+ * the single source of truth used by both {@link validateInputsForMajor}
+ * and {@link buildSconsArgs}, so both report the same error.
+ */
+export function resolveArchArg(
+  platform: string,
+  architecture: string,
+  major: GodotMajor
+): string | undefined {
+  if (architecture === 'auto') return undefined
+
+  let mapped: string | undefined
+  let supported: string[]
+  if (major === 3) {
+    const table = GODOT3_ARCHITECTURES[platform as Platform]
+    mapped = table[architecture as Architecture]
+    supported = Object.keys(table)
+  } else {
+    const allowed = GODOT4_ARCHITECTURES[platform as Platform]
+    if (allowed.includes(architecture as Architecture)) {
+      mapped = `arch=${architecture}`
+    }
+    supported = [...allowed]
+  }
+
+  if (mapped === undefined) {
+    throw new Error(
+      `Architecture "${architecture}" is not supported for platform ` +
+        `"${platform}" when building Godot ${major}.x. ` +
+        (supported.length > 0
+          ? `Supported: auto, ${supported.join(', ')}.`
+          : `Only "auto" is supported.`)
+    )
+  }
+  return mapped
+}
+
+/**
+ * Validates that the (already individually validated) inputs can be built
+ * for the given Godot major version, so incompatible combinations fail
+ * before anything is downloaded:
+ *
+ * - architecture must be supported by every requested platform;
+ * - `editor` must not be requested for platforms without an editor build;
+ * - `ios_simulator` / `generate_bundle` only with the platforms they apply to;
+ * - Godot 3.x additionally rejects `generate_bundle` and 4.x-only optimize
+ *   levels.
+ */
+export function validateInputsForMajor(
+  major: GodotMajor,
+  platforms: string[],
+  targets: string[],
+  architecture: string,
+  options: SconsOptions
+): void {
+  for (const platform of platforms) {
+    resolveArchArg(platform, architecture, major)
+  }
+
+  if (targets.includes('editor')) {
+    const noEditor = EDITOR_UNSUPPORTED_PLATFORMS[major]
+    const offending = platforms.find((p) => noEditor.includes(p as Platform))
+    if (offending !== undefined) {
+      throw new Error(
+        `Target "editor" is not available for platform "${offending}" ` +
+          `when building Godot ${major}.x. ` +
+          `Use template_debug or template_release instead.`
+      )
+    }
+  }
+
+  if (major === 3) {
+    if (options.generate_bundle !== undefined) {
+      throw new Error(
+        `generate_bundle is only supported when building Godot 4.x. ` +
+          `Godot 3.x creates app bundles via the scripts in misc/dist instead.`
+      )
+    }
+    if (
+      options.optimize !== undefined &&
+      !(GODOT3_OPTIMIZE_VALUES as readonly string[]).includes(options.optimize)
+    ) {
+      throw new Error(
+        `optimize=${options.optimize} is not supported when building Godot 3.x. ` +
+          `Supported: ${GODOT3_OPTIMIZE_VALUES.join(', ')}.`
+      )
+    }
+  }
+
+  for (const key of Object.keys(OPTION_PLATFORMS) as Array<
+    keyof typeof OPTION_PLATFORMS
+  >) {
+    if (options[key] === undefined) continue
+    const allowed = OPTION_PLATFORMS[key]
+    const offending = platforms.find((p) => !allowed.includes(p as Platform))
+    if (offending !== undefined) {
+      throw new Error(
+        `Option "${key}" is only supported for platform(s) ` +
+          `${allowed.join(', ')}, but "${offending}" was requested.`
+      )
+    }
+  }
+}
+
 /**
  * Builds the SCons argument list for a single platform × target combination.
+ *
+ * `platform`, `target` and `architecture` always use the Godot 4.x names;
+ * for Godot 3.x they are translated via the GODOT3_* tables.
  */
 export function buildSconsArgs(
   platform: string,
   target: string,
   architecture: string,
-  options: SconsOptions
+  options: SconsOptions,
+  major: GodotMajor = 4
 ): string[] {
-  const args: string[] = [`platform=${platform}`, `target=${target}`]
+  const args: string[] =
+    major === 3
+      ? [
+          `platform=${GODOT3_PLATFORMS[platform as Platform]}`,
+          ...GODOT3_TARGETS[target as Target]
+        ]
+      : [`platform=${platform}`, `target=${target}`]
 
-  if (architecture !== 'auto') {
-    args.push(`arch=${architecture}`)
+  const archArg = resolveArchArg(platform, architecture, major)
+  if (archArg !== undefined) {
+    args.push(archArg)
   }
   if (options.debug_symbols !== undefined) {
     args.push(`debug_symbols=${options.debug_symbols}`)
@@ -203,18 +527,32 @@ export async function downloadAndExtract(
   // .tar.xz → flags 'xJ' → tar -C <dest> xJ -f <file>
   await tc.extractTar(tarPath, directory, 'xJ')
 
-  // The tarball conventionally unpacks to godot-<version>-<flavor>/.
-  // Find the extracted directory robustly in case the name differs slightly.
+  // The tarball unpacks to godot-<version>-<flavor>/. Prefer that exact name:
+  // a reused working directory may already contain other godot-* trees (e.g.
+  // a cached 3.x checkout next to a 4.x one) and picking the first match
+  // would silently build the wrong version.
+  const expected = `godot-${version}-${flavor}`
   const entries = fs.readdirSync(directory)
-  const extractedEntry = entries.find((e) => {
+  const candidates = entries.filter((e) => {
     const fullPath = path.join(directory, e)
     return fs.statSync(fullPath).isDirectory() && e.startsWith('godot-')
   })
 
-  if (!extractedEntry) {
+  let extractedEntry: string
+  if (candidates.includes(expected)) {
+    extractedEntry = expected
+  } else if (candidates.length === 1) {
+    extractedEntry = candidates[0]
+  } else if (candidates.length === 0) {
     throw new Error(
       `Extraction succeeded but no "godot-*" directory was found in ${directory}. ` +
         `Entries: ${entries.join(', ')}`
+    )
+  } else {
+    throw new Error(
+      `Expected "${expected}" in ${directory} but found several other ` +
+        `godot-* directories: ${candidates.join(', ')}. ` +
+        `Use an empty working directory.`
     )
   }
 
@@ -225,26 +563,32 @@ export async function downloadAndExtract(
 
 /**
  * Installs SCons via pip3 so the Godot build system can be invoked.
+ *
+ * Godot 3.x build scripts are not compatible with recent SCons releases, so a
+ * pinned version range is installed when building a 3.x tree.
  */
-export async function setupScons(): Promise<void> {
-  core.info('Installing SCons via pip3...')
+export async function setupScons(major: GodotMajor = 4): Promise<void> {
+  const requirement = major === 3 ? GODOT3_SCONS_REQUIREMENT : 'scons'
+  core.info(`Installing SCons via pip3 (${requirement})...`)
   await exec.exec('pip3', [
     'install',
     '--quiet',
     '--break-system-packages',
-    'scons'
+    requirement
   ])
 }
 
 /**
  * Runs the Godot SCons build for every platform × target combination.
- * Optionally enforces a wall-clock timeout (in seconds; 0 = unlimited).
+ * Optionally enforces a wall-clock timeout (in seconds; 0 = unlimited) that
+ * covers all combinations together.
  *
  * A separate `scons` invocation is made for each combination so that
  * partial failures are attributable to a specific build.
  *
  * Uses buildSconsArgs so that all parsed options (debug_symbols,
- * optimize, etc.) are correctly passed to SCons.
+ * optimize, etc.) are correctly passed to SCons and translated for the
+ * requested Godot major version.
  */
 export async function runBuild(
   sourceDir: string,
@@ -253,11 +597,34 @@ export async function runBuild(
   architecture: string,
   options: SconsOptions,
   timeoutSeconds: number,
-  onTimeout?: () => Promise<void>
+  onTimeout?: () => Promise<void>,
+  major: GodotMajor = 4
 ): Promise<void> {
+  // The timeout bounds the whole run, not each SCons invocation: every
+  // invocation only gets the time that is left until the shared deadline.
+  const deadline =
+    timeoutSeconds > 0 ? Date.now() + timeoutSeconds * 1000 : undefined
+
   for (const platform of platforms) {
     for (const target of targets) {
-      const args = buildSconsArgs(platform, target, architecture, options)
+      let remainingMs = 0
+      if (deadline !== undefined) {
+        remainingMs = deadline - Date.now()
+        if (remainingMs <= 0) {
+          core.info('Timeout reached between builds. Securing headers...')
+          await runTimeoutCallback(onTimeout)
+          core.warning('Build loop terminated due to timeout.')
+          return
+        }
+      }
+
+      const args = buildSconsArgs(
+        platform,
+        target,
+        architecture,
+        options,
+        major
+      )
 
       core.info(`Building: scons ${args.join(' ')}`)
 
@@ -265,7 +632,7 @@ export async function runBuild(
         'scons',
         args,
         sourceDir,
-        timeoutSeconds * 1000,
+        remainingMs,
         onTimeout
       )
 
@@ -274,6 +641,21 @@ export async function runBuild(
         return
       }
     }
+  }
+}
+
+/**
+ * Invokes the optional timeout callback, logging (not propagating) failures
+ * so that a failed header archive never prevents the build from stopping.
+ */
+async function runTimeoutCallback(
+  onTimeout?: () => Promise<void>
+): Promise<void> {
+  if (!onTimeout) return
+  try {
+    await onTimeout()
+  } catch (err) {
+    core.error(`Header archiving failed during timeout: ${err}`)
   }
 }
 
@@ -306,15 +688,7 @@ export async function spawnWithTimeout(
       timer = setTimeout(async () => {
         isTimeout = true
         core.info('Timeout reached. Securing headers before termination...')
-
-        if (onTimeout) {
-          try {
-            await onTimeout()
-          } catch (err) {
-            core.error(`Header archiving failed during timeout: ${err}`)
-          }
-        }
-
+        await runTimeoutCallback(onTimeout)
         child.kill('SIGTERM')
       }, timeoutMs)
     }
