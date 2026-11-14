@@ -28,39 +28,58 @@ src/
   index.ts      Entrypoint — imports and calls run()
   main.ts       Action logic — reads inputs, validates them, calls godot
                 helpers, sets outputs
-  godot.ts      All build logic — pure helpers (parseMultiInput, parseOptions,
-                buildDownloadUrl, buildSconsArgs) and side-effectful functions
+  godot.ts      All build logic — pure helpers (parseVersion, parseTimeout,
+                validateFlavor, parseMultiInput, parseOptions,
+                validateInputsForMajor, buildDownloadUrl, buildSconsArgs, the
+                Godot 3.x translation tables) and side-effectful functions
                 (downloadAndExtract, setupScons, runBuild, spawnWithTimeout,
                 createHeaderArchive)
 __tests__/
+  index.test.ts Verifies the entrypoint calls run() once
   main.test.ts  Integration-style tests for run() with mocked I/O and mocked
                 godot helpers
   godot.test.ts Unit tests for every exported function in godot.ts; side
                 effects are isolated by mocking @actions/tool-cache,
-                @actions/exec, @actions/glob, adm-zip, and child_process
+                @actions/exec, adm-zip, node:fs and child_process
 __fixtures__/
   core.ts       Jest mock for @actions/core
   godot.ts      Jest mock for src/godot.ts (stubs side-effectful functions
                 while re-exporting pure helpers directly)
 dist/           Compiled output — committed to the repository (see Releasing)
+docs/           Contributor documentation
+script/release  Interactive helper that tags and pushes a release
 action.yml      Action metadata: inputs, outputs, branding, runtime
+jest.config.js  Jest configuration (enforces 100% coverage)
+stryker.config.mjs
+                Stryker mutation-testing configuration
 ```
 
 ## Day-to-day commands
 
-| Task                             | Command                |
-| -------------------------------- | ---------------------- |
-| Format code                      | `npm run format:write` |
-| Check formatting without writing | `npm run format:check` |
-| Lint                             | `npm run lint`         |
-| Run tests                        | `npm test`             |
-| Run tests (CI mode)              | `npm run ci-test`      |
-| Build `dist/`                    | `npm run package`      |
-| Format + lint + test + build     | `npm run all`          |
-| Run action locally               | `npm run local-action` |
+| Task                             | Command                 |
+| -------------------------------- | ----------------------- |
+| Format code                      | `npm run format:write`  |
+| Check formatting without writing | `npm run format:check`  |
+| Lint                             | `npm run lint`          |
+| Run tests                        | `npm test`              |
+| Run tests (CI mode)              | `npm run ci-test`       |
+| Run mutation tests (Stryker)     | `npm run test:mutation` |
+| Build `dist/`                    | `npm run package`       |
+| Format + lint + test + build     | `npm run all`           |
+| Run action locally               | `npm run local-action`  |
 
 Always run `npm run all` before opening a pull request or cutting a release. It
 catches formatting, lint, test, and build issues in one pass.
+
+`npm test` enforces 100% statement, branch, function and line coverage
+(`coverageThreshold` in `jest.config.js`); a change that leaves any line
+untested fails the run.
+
+Because line coverage is saturated, use `npm run test:mutation` to check that
+tests actually assert behaviour. Stryker injects small bugs into `src/godot.ts`
+and reports how many the tests catch; the HTML report is written to
+`reports/mutation/index.html`. CI runs it as a non-blocking job. Surviving
+mutants that only change `core.info` log text are expected.
 
 ## Running the action locally
 
@@ -86,6 +105,8 @@ terminal without pushing anything.
    INPUT_OPTIONS=
    INPUT_TIMEOUT=0
    ```
+
+   Set `INPUT_VERSION=3.6` to exercise the Godot 3.x translation path.
 
 1. Run the action:
 

@@ -1,25 +1,28 @@
 {
   "name": "build-godot",
   "description": "GitHub Action to download and build the Godot game engine from source",
-  "version": "1.1.0",
-  "author": "",
+  "version": "1.2.0",
+  "author": "Action Commons (https://github.com/ActionCommons)",
   "type": "module",
   "private": true,
-  "homepage": "https://github.com/actions/typescript-action",
+  "homepage": "https://github.com/ActionCommons/build-godot#readme",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/actions/typescript-action.git"
+    "url": "git+https://github.com/ActionCommons/build-godot.git"
   },
   "bugs": {
-    "url": "https://github.com/actions/typescript-action/issues"
+    "url": "https://github.com/ActionCommons/build-godot/issues"
   },
   "keywords": [
     "actions",
+    "github-actions",
     "godot",
-    "build"
+    "godot-engine",
+    "build",
+    "scons"
   ],
   "exports": {
-    ".": "./dist/index.js"
+    ".": "./dist/index.cjs"
   },
   "engines": {
     "node": ">=24.0.0"
@@ -35,13 +38,13 @@
     "package": "npx rimraf ./dist && npx rollup --config rollup.config.ts --configPlugin @rollup/plugin-typescript",
     "package:watch": "npm run package -- --watch",
     "test": "NODE_OPTIONS=--experimental-vm-modules NODE_NO_WARNINGS=1 npx jest",
+    "test:mutation": "npx stryker run",
     "all": "npm run format:write && npm run lint && npm run test && npm run coverage && npm run package"
   },
   "license": "MIT",
   "dependencies": {
     "@actions/core": "^3.0.1",
     "@actions/exec": "^3.0.0",
-    "@actions/glob": "^0.7.0",
     "@actions/tool-cache": "^4.0.0",
     "adm-zip": "^0.5.16"
   },
@@ -54,6 +57,8 @@
     "@rollup/plugin-commonjs": "^29.0.0",
     "@rollup/plugin-node-resolve": "^16.0.3",
     "@rollup/plugin-typescript": "^12.3.0",
+    "@stryker-mutator/core": "^10.1.1",
+    "@stryker-mutator/jest-runner": "^10.1.1",
     "@types/adm-zip": "^0.5.5",
     "@types/jest": "^30.0.0",
     "@types/node": "^26.0.1",

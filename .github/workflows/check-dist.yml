@@ -1,6 +1,6 @@
 # In TypeScript actions, `dist/` is a special directory. When you reference
-# an action with the `uses:` property, `dist/index.js` is the code that will be
-# run. For this project, the `dist/index.js` file is transpiled from other
+# an action with the `uses:` property, `dist/index.cjs` is the code that will be
+# run. For this project, the `dist/index.cjs` file is transpiled from other
 # source files. This workflow ensures the `dist/` directory contains the
 # expected transpiled code.
 #

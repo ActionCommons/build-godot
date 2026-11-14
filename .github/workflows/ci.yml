@@ -57,7 +57,39 @@ jobs:
           path: coverage/
           retention-days: 14
 
-  # Job 2: Integration Tests (3 Essential Scenarios)
+  # Job 1b: Mutation Testing (non-blocking; reports how many injected bugs the
+  # unit tests catch, since line coverage is already at 100%)
+  mutation-test:
+    name: Mutation Tests
+    runs-on: ubuntu-latest
+    needs: test-typescript
+    continue-on-error: true
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v6
+        with:
+          node-version-file: .node-version
+          cache: npm
+
+      - name: Install Dependencies
+        run: npm ci
+
+      - name: Run Stryker
+        run: npm run test:mutation
+
+      - name: Upload Mutation Report
+        if: ${{ always() }}
+        uses: actions/upload-artifact@v7
+        with:
+          name: mutation-report
+          path: reports/mutation/
+          retention-days: 14
+
+  # Job 2: Integration Tests
   test-action:
     name: ${{ matrix.config.name }}
     runs-on: ${{ matrix.config.runner }}
@@ -81,7 +113,19 @@ jobs:
             version: '4.6'
             flavor: 'dev6'
 
-          # 3. Multi-Target Header Archive Generation, Custom Directory & Timeout
+          # 3. Godot 3.x build (verifies major-version detection, 4.x -> 3.x
+          #    input translation and the pinned SCons install). Bounded by a
+          #    timeout so CI only checks that the translated SCons invocation
+          #    configures and starts compiling.
+          - name: Godot 3.x Linux Editor
+            runner: ubuntu-latest
+            platform: linuxbsd
+            target: editor
+            version: '3.6'
+            architecture: x86_64
+            timeout: '120' # 2 minutes
+
+          # 4. Multi-Target Header Archive Generation, Custom Directory & Timeout
           #    iOS requires macOS — the SCons platform detector only exposes
           #    "ios" when running on a Darwin host.
           - name: Multi-Target iOS Header Generation with Custom Path & Timeout
@@ -93,6 +137,46 @@ jobs:
             timeout: '40' # 40 seconds
             options: 'create_header_archive'
 
+          # 5. Godot 4.x on Windows (verifies pip3/SCons/tar on a Windows host).
+          - name: Windows Template 4.x
+            runner: windows-latest
+            platform: windows
+            target: template_release
+            version: '4.5'
+            architecture: x86_64
+            timeout: '120' # 2 minutes
+
+          # 6. Godot 3.x macOS template (verifies macos -> osx translation and
+          #    arch=arm64 against real SCons).
+          - name: Godot 3.x macOS Template
+            runner: macos-latest
+            platform: macos
+            target: template_release
+            version: '3.6'
+            architecture: arm64
+            timeout: '120' # 2 minutes
+
+          # 7. Godot 3.x iOS template (verifies ios -> iphone translation). A
+          #    separate job because the timeout covers the whole run, so a
+          #    second platform in the same job would never start.
+          - name: Godot 3.x iOS Template
+            runner: macos-latest
+            platform: ios
+            target: template_release
+            version: '3.6'
+            architecture: arm64
+            timeout: '120' # 2 minutes
+
+          # 8. Failure path: an input that is invalid for Godot 3.x must fail
+          #    the step before anything is downloaded.
+          - name: Godot 3.x Invalid Input Fails
+            runner: ubuntu-latest
+            platform: macos
+            target: template_release
+            version: '3.6'
+            options: 'generate_bundle=yes'
+            expect_failure: true
+
     steps:
       - name: Checkout
         id: checkout
@@ -101,6 +185,7 @@ jobs:
       - name: Run Godot Build Action
         id: build
         uses: ./
+        continue-on-error: ${{ matrix.config.expect_failure == true }}
         with:
           version: ${{ matrix.config.version }}
           platform: ${{ matrix.config.platform }}
@@ -111,7 +196,23 @@ jobs:
           directory: ${{ matrix.config.directory || '' }}
           timeout: ${{ matrix.config.timeout || '0' }}
 
+      - name: Verify Expected Failure
+        if: ${{ matrix.config.expect_failure == true }}
+        shell: bash
+        run: |
+          if [[ "${{ steps.build.outcome }}" != "failure" ]]; then
+            echo "::error::Expected the action to fail, got: ${{ steps.build.outcome }}"
+            exit 1
+          fi
+          if [[ -n "${{ steps.build.outputs.directory }}" ]]; then
+            echo "::error::Validation failure must happen before the directory output is set"
+            exit 1
+          fi
+          echo "Action failed as expected."
+
       - name: Verify Output
+        if: ${{ matrix.config.expect_failure != true }}
+        shell: bash
         run: |
           echo "Build directory: ${{ steps.build.outputs.directory }}"
           if [[ "${{ matrix.config.options }}" == *"create_header_archive"* ]]; then

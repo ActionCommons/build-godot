@@ -16,11 +16,29 @@ export const createHeaderArchive = jest.fn<typeof godot.createHeaderArchive>()
 
 // Re-export pure helpers so main.test.ts can import the whole module from here
 export {
+  EDITOR_UNSUPPORTED_PLATFORMS,
+  FLAVOR_PATTERN,
+  GODOT3_ARCHITECTURES,
+  GODOT3_MIN_TESTED_MINOR,
+  GODOT3_OPTIMIZE_VALUES,
+  GODOT3_PLATFORMS,
+  GODOT3_SCONS_REQUIREMENT,
+  GODOT3_TARGETS,
+  GODOT4_ARCHITECTURES,
+  MAX_TIMEOUT_SECONDS,
+  OPTION_PLATFORMS,
+  SUPPORTED_MAJORS,
   VALID_ARCHITECTURES,
   VALID_PLATFORMS,
   VALID_TARGETS,
   buildDownloadUrl,
   buildSconsArgs,
+  parseMajorVersion,
   parseMultiInput,
-  parseOptions
+  parseOptions,
+  parseTimeout,
+  parseVersion,
+  resolveArchArg,
+  validateFlavor,
+  validateInputsForMajor
 } from '../src/godot.js'

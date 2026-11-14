@@ -10,9 +10,29 @@
   color: '#808080'
   description: Related to the iOS platform
 
-- name: gdscript
-  color: '#0075ca'
-  description: Related to the GDScript interface
+- name: linuxbsd
+  color: '#e95420'
+  description: Related to the Linux/BSD platform
+
+- name: macos
+  color: '#555555'
+  description: Related to the macOS platform
+
+- name: web
+  color: '#f16529'
+  description: Related to the Web (Emscripten) platform
+
+- name: windows
+  color: '#0078d4'
+  description: Related to the Windows platform
+
+- name: godot 3.x
+  color: '#478cbf'
+  description: Related to building Godot 3.x
+
+- name: godot 4.x
+  color: '#2e6fa8'
+  description: Related to building Godot 4.x
 
 - name: build system
   color: '#e4dcb4'
