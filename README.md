@@ -105,7 +105,7 @@ so the example above produces four builds.
 ### Build Godot 3.x export templates
 
 The same input names are used for Godot 3.x; the action translates them into the
-arguments the Godot 3 build system expects (see
+arguments the Godot 3 build tool expects (see
 [Building Godot 3.x](#building-godot-3x)).
 
 ```yaml
@@ -155,30 +155,30 @@ newline-separated:
 
 The action's inputs use the Godot 4.x vocabulary for every version. When the
 `version` input starts with `3.`, the action detects a Godot 3.x build and
-translates the inputs into the arguments the Godot 3 build system understands.
-You do **not** use the native 3.x names (`x11`, `osx`, `javascript`, `iphone`,
+translates the inputs into the arguments the Godot 3 build tool understands. You
+do **not** use the native 3.x names (`x11`, `osx`, `javascript`, `iphone`,
 `tools=yes`, `bits=64`, …) in the workflow; pass the 4.x names and the action
 translates them:
 
-| Input                                            | Godot 4.x SCons arguments     | Godot 3.x SCons arguments                                                                                              |
-| ------------------------------------------------ | ----------------------------- | ---------------------------------------------------------------------------------------------------------------------- |
-| `platform: linuxbsd`                             | `platform=linuxbsd`           | `platform=x11`                                                                                                         |
-| `platform: macos`                                | `platform=macos`              | `platform=osx`                                                                                                         |
-| `platform: web`                                  | `platform=web`                | `platform=javascript`                                                                                                  |
-| `platform: ios`                                  | `platform=ios`                | `platform=iphone`                                                                                                      |
-| `platform: windows` / `android`                  | unchanged                     | unchanged                                                                                                              |
-| `target: editor`                                 | `target=editor`               | `tools=yes target=release_debug`                                                                                       |
-| `target: template_debug`                         | `target=template_debug`       | `tools=no target=release_debug`                                                                                        |
-| `target: template_release`                       | `target=template_release`     | `tools=no target=release`                                                                                              |
-| `architecture: x86_32` / `x86_64`                | `arch=x86_32` / `arch=x86_64` | `bits=32` / `bits=64` (linuxbsd, windows); `android_arch=x86` / `android_arch=x86_64` (android); `arch=x86_64` (macos) |
-| `architecture: arm32` / `arm64`                  | `arch=arm32` / `arch=arm64`   | `android_arch=armv7` / `android_arch=arm64v8` (android); `arch=arm64` (macos, ios)                                     |
-| `architecture: rv64`, `ppc32`, `ppc64`, `wasm32` | `arch=…`                      | **rejected** – no Godot 3.x equivalent                                                                                 |
-| `architecture: auto`                             | _(omitted)_                   | _(omitted)_ – SCons detects the host                                                                                   |
-| `optimize=speed` / `size` / `none`               | passed through                | passed through                                                                                                         |
-| `optimize=speed_trace` / `debug` / `custom`      | passed through                | **rejected**                                                                                                           |
-| `debug_symbols=…`, `ios_simulator=…`             | passed through                | passed through                                                                                                         |
-| `generate_bundle=…`                              | passed through                | **rejected** – Godot 3.x builds app bundles via the scripts in `misc/dist`                                             |
-| `create_header_archive`                          | handled by the action         | handled by the action                                                                                                  |
+| Input                                            | Godot 4.x SCons arguments     | Godot 3.x SCons arguments                                                                                                      |
+| ------------------------------------------------ | ----------------------------- | ------------------------------------------------------------------------------------------------------------------------------ |
+| `platform: linuxbsd`                             | `platform=linuxbsd`           | `platform=x11`                                                                                                                 |
+| `platform: macos`                                | `platform=macos`              | `platform=osx`                                                                                                                 |
+| `platform: web`                                  | `platform=web`                | `platform=javascript`                                                                                                          |
+| `platform: ios`                                  | `platform=ios`                | `platform=iphone`                                                                                                              |
+| `platform: windows` / `android`                  | unchanged                     | unchanged                                                                                                                      |
+| `target: editor`                                 | `target=editor`               | `tools=yes target=release_debug`                                                                                               |
+| `target: template_debug`                         | `target=template_debug`       | `tools=no target=release_debug`                                                                                                |
+| `target: template_release`                       | `target=template_release`     | `tools=no target=release`                                                                                                      |
+| `architecture: x86_32` / `x86_64`                | `arch=x86_32` / `arch=x86_64` | `bits=32` / `bits=64` (`linuxbsd`, `windows`); `android_arch=x86` / `android_arch=x86_64` (`android`); `arch=x86_64` (`macos`) |
+| `architecture: arm32` / `arm64`                  | `arch=arm32` / `arch=arm64`   | `android_arch=armv7` / `android_arch=arm64v8` (`android`); `arch=arm64` (`macos`, `ios`)                                       |
+| `architecture: rv64`, `ppc32`, `ppc64`, `wasm32` | `arch=…`                      | **rejected** – no Godot 3.x equivalent                                                                                         |
+| `architecture: auto`                             | _(omitted)_                   | _(omitted)_ – SCons detects the host                                                                                           |
+| `optimize=speed` / `size` / `none`               | passed through                | passed through                                                                                                                 |
+| `optimize=speed_trace` / `debug` / `custom`      | passed through                | **rejected**                                                                                                                   |
+| `debug_symbols=…`, `ios_simulator=…`             | passed through                | passed through                                                                                                                 |
+| `generate_bundle=…`                              | passed through                | **rejected** – Godot 3.x builds app bundles via the scripts in `misc/dist`                                                     |
+| `create_header_archive`                          | handled by the action         | handled by the action                                                                                                          |
 
 Inputs that cannot be expressed for Godot 3.x fail the step immediately, before
 any source is downloaded, with an error that names the input and the supported
@@ -194,6 +194,20 @@ Other 3.x specifics:
 - **SCons version:** Godot 3.x build scripts are not compatible with the latest
   SCons releases, so the action installs `scons<4.8` for 3.x builds. Godot 4.x
   builds keep installing the latest SCons.
+- **Linux system packages:** Godot 4.x loads X11, OpenGL and audio libraries at
+  runtime, so `platform: linuxbsd` builds need no extra packages. Godot 3.x
+  links against them at build time, so install the development headers before
+  the action runs, otherwise SCons aborts with `X11 libraries not found`:
+
+  ```yaml
+  - name: Install Godot 3.x build dependencies
+    run: |
+      sudo apt-get update
+      sudo apt-get install -y --no-install-recommends \
+        libx11-dev libxcursor-dev libxinerama-dev libxi-dev libxrandr-dev \
+        libgl1-mesa-dev libglu1-mesa-dev libasound2-dev libpulse-dev libudev-dev
+  ```
+
 - **Output binaries:** Godot 3.x produces differently named binaries (for
   example `bin/godot.x11.opt.tools.64`). The `directory` output points at the
   working directory in both cases.
