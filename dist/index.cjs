@@ -2602,11 +2602,77 @@ function requireRequest$1 () {
 	    }
 	  }
 
-	  onUpgrade (statusCode, headers, socket) {
+	  /**
+	   * @param {number|null} statusCode
+	   * @param {Buffer[]|null} headers
+	   * @param {import('node:stream').Duplex} socket
+	   * @param {string} [statusText]
+	   */
+	  onUpgrade (statusCode, headers, socket, statusText = '') {
+	    this.onFinally();
+
 	    assert(!this.aborted);
 	    assert(!this.completed);
 
-	    return this[kHandler].onUpgrade(statusCode, headers, socket)
+	    if (statusCode !== null) {
+	      this.#publishUpgradeHeaders(statusCode, headers, statusText);
+	    }
+
+	    const result = this[kHandler].onUpgrade(statusCode, headers, socket);
+
+	    if (!this.aborted) {
+	      this.completed = true;
+	      if (statusCode !== null) {
+	        this.#publishUpgradeTrailers();
+	      }
+	    }
+
+	    return result
+	  }
+
+	  /**
+	   * @param {number} statusCode
+	   * @param {import('node:http2').IncomingHttpHeaders} headers
+	   * @param {(headers: import('node:http2').IncomingHttpHeaders) => Buffer[]} parseHeaders
+	   * @param {string} [statusText]
+	   */
+	  onUpgradeResponse (statusCode, headers, parseHeaders, statusText = '') {
+	    assert(!this.aborted);
+	    assert(this.completed);
+
+	    if (channels.headers.hasSubscribers) {
+	      this.#publishUpgradeHeaders(statusCode, parseHeaders(headers), statusText);
+	    }
+	    this.#publishUpgradeTrailers();
+	  }
+
+	  /**
+	   * @param {Error} error
+	   */
+	  onUpgradeError (error) {
+	    assert(!this.aborted);
+	    assert(this.completed);
+
+	    if (channels.error.hasSubscribers) {
+	      channels.error.publish({ request: this, error });
+	    }
+	  }
+
+	  /**
+	   * @param {number} statusCode
+	   * @param {Buffer[]} headers
+	   * @param {string} statusText
+	   */
+	  #publishUpgradeHeaders (statusCode, headers, statusText) {
+	    if (channels.headers.hasSubscribers) {
+	      channels.headers.publish({ request: this, response: { statusCode, headers, statusText } });
+	    }
+	  }
+
+	  #publishUpgradeTrailers () {
+	    if (channels.trailers.hasSubscribers) {
+	      channels.trailers.publish({ request: this, trailers: [] });
+	    }
 	  }
 
 	  onComplete (trailers) {
@@ -2689,7 +2755,13 @@ function requireRequest$1 () {
 	      } else if (typeof val[i] === 'object') {
 	        throw new InvalidArgumentError(`invalid ${key} header`)
 	      } else {
-	        arr.push(`${val[i]}`);
+	        // Coerce primitives (and reject unsafe coercions such as functions
+	        // with a crafted toString/Symbol.toPrimitive).
+	        const str = `${val[i]}`;
+	        if (!isValidHeaderValue(str)) {
+	          throw new InvalidArgumentError(`invalid ${key} header`)
+	        }
+	        arr.push(str);
 	      }
 	    }
 	    val = arr;
@@ -2700,7 +2772,12 @@ function requireRequest$1 () {
 	  } else if (val === null) {
 	    val = '';
 	  } else {
+	    // Coerce primitives (and reject unsafe coercions such as functions
+	    // with a crafted toString/Symbol.toPrimitive).
 	    val = `${val}`;
+	    if (!isValidHeaderValue(val)) {
+	      throw new InvalidArgumentError(`invalid ${key} header`)
+	    }
 	  }
 
 	  if (headerName === 'host') {
@@ -2825,6 +2902,7 @@ function requireDispatcherBase () {
 	if (hasRequiredDispatcherBase) return dispatcherBase;
 	hasRequiredDispatcherBase = 1;
 
+	const buffer = require$$0;
 	const Dispatcher = requireDispatcher();
 	const {
 	  ClientDestroyedError,
@@ -2837,6 +2915,7 @@ function requireDispatcherBase () {
 	const kOnClosed = Symbol('onClosed');
 	const kInterceptedDispatch = Symbol('Intercepted Dispatch');
 	const kWebSocketOptions = Symbol('webSocketOptions');
+	const kEventSourceOptions = Symbol('eventSourceOptions');
 
 	class DispatcherBase extends Dispatcher {
 	  constructor (opts) {
@@ -2847,12 +2926,19 @@ function requireDispatcherBase () {
 	    this[kClosed] = false;
 	    this[kOnClosed] = [];
 	    this[kWebSocketOptions] = opts?.webSocket ?? {};
+	    this[kEventSourceOptions] = opts?.eventSource ?? {};
 	  }
 
 	  get webSocketOptions () {
 	    return {
 	      maxFragments: this[kWebSocketOptions].maxFragments ?? 131072,
 	      maxPayloadSize: this[kWebSocketOptions].maxPayloadSize ?? 128 * 1024 * 1024
+	    }
+	  }
+
+	  get eventSourceOptions () {
+	    return {
+	      maxEventSize: this[kEventSourceOptions].maxEventSize ?? buffer.kStringMaxLength
 	    }
 	  }
 
@@ -8756,6 +8842,7 @@ function requireClientH1 () {
 	  RequestContentLengthMismatchError,
 	  ResponseContentLengthMismatchError,
 	  RequestAbortedError,
+	  InvalidArgumentError,
 	  HeadersTimeoutError,
 	  HeadersOverflowError,
 	  SocketError,
@@ -9177,7 +9264,7 @@ function requireClientH1 () {
 	  }
 
 	  onUpgrade (head) {
-	    const { upgrade, client, socket, headers, statusCode } = this;
+	    const { upgrade, client, socket, headers, statusCode, statusText } = this;
 
 	    assert(upgrade);
 	    assert(client[kSocket] === socket);
@@ -9212,9 +9299,10 @@ function requireClientH1 () {
 	    client.emit('disconnect', client[kUrl], [client], new InformationalError('upgrade'));
 
 	    try {
-	      request.onUpgrade(statusCode, headers, socket);
-	    } catch (err) {
-	      util.destroy(socket, err);
+	      request.onUpgrade(statusCode, headers, socket, statusText);
+	    } catch (error) {
+	      util.errorRequest(client, request, error);
+	      util.destroy(socket, error);
 	    }
 
 	    client[kResume]();
@@ -9471,8 +9559,6 @@ function requireClientH1 () {
 	  socket[kParser] = new Parser(client, socket, llhttpInstance);
 
 	  addListener(socket, 'error', function (err) {
-	    assert(err.code !== 'ERR_TLS_CERT_ALTNAME_INVALID');
-
 	    const parser = this[kParser];
 
 	    // On Mac OS, we get an ECONNRESET even if there is a full body to be forwarded
@@ -9621,7 +9707,7 @@ function requireClientH1 () {
 
 	function clearIdleSocketValidation (socket) {
 	  if (socket[kIdleSocketValidationTimeout]) {
-	    clearTimeout(socket[kIdleSocketValidationTimeout]);
+	    clearImmediate(socket[kIdleSocketValidationTimeout]);
 	    socket[kIdleSocketValidationTimeout] = null;
 	  }
 
@@ -9630,15 +9716,23 @@ function requireClientH1 () {
 
 	function scheduleIdleSocketValidation (client, socket) {
 	  socket[kIdleSocketValidation] = 1;
-	  socket[kIdleSocketValidationTimeout] = setTimeout(() => {
+	  // Yield to the check phase (after poll) so unsolicited bytes / FIN / RST
+	  // already pending on this idle keep-alive socket are processed before the
+	  // next request is written (GHSA-35p6-xmwp-9g52).
+	  //
+	  // setTimeout(0) pays Node's ~1ms timer floor on every sequential reuse
+	  // (#5493). setImmediate avoids that, but an *unref'd* Immediate lets poll
+	  // block for ~500ms when the event loop is otherwise idle (#5600 / #5606).
+	  // A ref'd Immediate both keeps the pending request alive and makes poll
+	  // return immediately — the hybrid those issues asked for.
+	  socket[kIdleSocketValidationTimeout] = setImmediate(() => {
 	    socket[kIdleSocketValidationTimeout] = null;
 	    socket[kIdleSocketValidation] = 2;
 
 	    if (client[kSocket] === socket && !socket.destroyed) {
 	      client[kResume]();
 	    }
-	  }, 0);
-	  socket[kIdleSocketValidationTimeout].unref?.();
+	  });
 	}
 
 	/**
@@ -9739,8 +9833,16 @@ function requireClientH1 () {
 	    }
 	    body = bodyStream.stream;
 	    contentLength = bodyStream.length;
-	  } else if (util.isBlobLike(body) && request.contentType == null && body.type) {
-	    headers.push('content-type', body.type);
+	  } else if (util.isBlobLike(body) && request.contentType == null) {
+	    const contentType = body.type;
+	    if (contentType) {
+	      const contentTypeValue = `${contentType}`;
+	      if (!util.isValidHeaderValue(contentTypeValue)) {
+	        util.errorRequest(client, request, new InvalidArgumentError('invalid content-type header'));
+	        return false
+	      }
+	      headers.push('content-type', contentTypeValue);
+	    }
 	  }
 
 	  if (body && typeof body.read === 'function') {
@@ -9779,12 +9881,22 @@ function requireClientH1 () {
 	  const socket = client[kSocket];
 	  clearIdleSocketValidation(socket);
 
-	  const abort = (err) => {
-	    if (request.aborted || request.completed) {
+	  /**
+	   * @param {Error} [error]
+	   */
+	  const abort = (error) => {
+	    if (request.aborted) {
 	      return
 	    }
 
-	    util.errorRequest(client, request, err || new RequestAbortedError());
+	    if (request.completed) {
+	      if (request.upgrade || request.method === 'CONNECT') {
+	        util.destroy(socket, new InformationalError('aborted'));
+	      }
+	      return
+	    }
+
+	    util.errorRequest(client, request, error || new RequestAbortedError());
 
 	    util.destroy(body);
 	    util.destroy(socket, new InformationalError('aborted'));
@@ -10242,6 +10354,7 @@ function requireClientH2 () {
 	hasRequiredClientH2 = 1;
 
 	const assert = require$$0$1;
+	const { errorMonitor } = require$$8;
 	const { pipeline } = require$$0$2;
 	const util = requireUtil$8();
 	const {
@@ -10318,6 +10431,15 @@ function requireClientH2 () {
 	  return result
 	}
 
+	/**
+	 * @param {import('node:http2').IncomingHttpHeaders} headers
+	 * @returns {Buffer[]}
+	 */
+	function parseH2ResponseHeaders (headers) {
+	  const { [HTTP2_HEADER_STATUS]: _statusCode, ...realHeaders } = headers;
+	  return parseH2Headers(realHeaders)
+	}
+
 	async function connectH2 (client, socket) {
 	  client[kSocket] = socket;
 
@@ -10367,8 +10489,6 @@ function requireClientH2 () {
 	  socket[kHTTP2Session] = session;
 
 	  util.addListener(socket, 'error', function (err) {
-	    assert(err.code !== 'ERR_TLS_CERT_ALTNAME_INVALID');
-
 	    this[kError] = err;
 
 	    this[kClient][kOnError](err);
@@ -10442,8 +10562,6 @@ function requireClientH2 () {
 	}
 
 	function onHttp2SessionError (err) {
-	  assert(err.code !== 'ERR_TLS_CERT_ALTNAME_INVALID');
-
 	  this[kSocket][kError] = err;
 	  this[kClient][kOnError](err);
 	}
@@ -10538,22 +10656,32 @@ function requireClientH2 () {
 	  headers[HTTP2_HEADER_AUTHORITY] = host || `${hostname}${port ? `:${port}` : ''}`;
 	  headers[HTTP2_HEADER_METHOD] = method;
 
-	  const abort = (err) => {
-	    if (request.aborted || request.completed) {
+	  /**
+	   * @param {Error} [error]
+	   */
+	  const abort = (error) => {
+	    if (request.aborted) {
 	      return
 	    }
 
-	    err = err || new RequestAbortedError();
+	    if (request.completed) {
+	      if (method === 'CONNECT' && stream != null) {
+	        util.destroy(stream, error || new RequestAbortedError());
+	      }
+	      return
+	    }
 
-	    util.errorRequest(client, request, err);
+	    error = error || new RequestAbortedError();
+
+	    util.errorRequest(client, request, error);
 
 	    if (stream != null) {
-	      util.destroy(stream, err);
+	      util.destroy(stream, error);
 	    }
 
 	    // We do not destroy the socket as we can continue using the session
 	    // the stream get's destroyed and the session remains to create new streams
-	    util.destroy(body, err);
+	    util.destroy(body, error);
 	    client[kQueue][client[kRunningIdx]++] = null;
 	    client[kResume]();
 	  };
@@ -10572,25 +10700,57 @@ function requireClientH2 () {
 
 	  if (method === 'CONNECT') {
 	    session.ref();
-	    // We are already connected, streams are pending, first request
-	    // will create a new stream. We trigger a request to create the stream and wait until
-	    // `ready` event is triggered
 	    // We disabled endStream to allow the user to write to the stream
 	    stream = session.request(headers, { endStream: false, signal });
+	    let upgradeResponseFinished = false;
 
-	    if (stream.id && !stream.pending) {
-	      request.onUpgrade(null, null, stream);
-	      ++session[kOpenStreams];
-	      client[kQueue][client[kRunningIdx]++] = null;
-	    } else {
-	      stream.once('ready', () => {
+	    /**
+	     * @param {import('node:http2').IncomingHttpHeaders} headers
+	     */
+	    const onResponse = (headers) => {
+	      upgradeResponseFinished = true;
+	      stream.off(errorMonitor, onUpgradeError);
+	      request.onUpgradeResponse(Number(headers[HTTP2_HEADER_STATUS]), headers, parseH2ResponseHeaders);
+	    };
+
+	    /**
+	     * @param {Error} error
+	     */
+	    const onUpgradeError = (error) => {
+	      upgradeResponseFinished = true;
+	      stream.off('response', onResponse);
+	      request.onUpgradeError(error);
+	    };
+
+	    const onReady = () => {
+	      try {
 	        request.onUpgrade(null, null, stream);
-	        ++session[kOpenStreams];
-	        client[kQueue][client[kRunningIdx]++] = null;
-	      });
-	    }
+	      } catch (error) {
+	        stream.off('response', onResponse);
+	        abort(error);
+	        return
+	      }
+
+	      if (request.aborted) {
+	        return
+	      }
+
+	      stream.off('error', abort);
+	      stream.once(errorMonitor, onUpgradeError);
+	      client[kQueue][client[kRunningIdx]++] = null;
+	    };
+
+	    stream.once('response', onResponse);
+	    stream.once('error', abort);
+	    ++session[kOpenStreams];
+	    onReady();
 
 	    stream.once('close', () => {
+	      if (!upgradeResponseFinished && request.completed) {
+	        stream.off('response', onResponse);
+	        stream.off(errorMonitor, onUpgradeError);
+	        request.onUpgradeError(new InformationalError(`HTTP/2: "stream error" received - code ${stream.rstCode}`));
+	      }
 	      session[kOpenStreams] -= 1;
 	      if (session[kOpenStreams] === 0) session.unref();
 	    });
@@ -11349,9 +11509,10 @@ function requireClient () {
 	    // h2
 	    maxConcurrentStreams,
 	    allowH2,
-	    webSocket
+	    webSocket,
+	    eventSource
 	  } = {}) {
-	    super({ webSocket });
+	    super({ webSocket, eventSource });
 
 	    if (keepAlive !== undefined) {
 	      throw new InvalidArgumentError('unsupported keepAlive, use pipelining=0 instead')
@@ -12596,7 +12757,7 @@ function requireAgent () {
 	}
 
 	class Agent extends DispatcherBase {
-	  constructor ({ factory = defaultFactory, maxRedirections = 0, connect, ...options } = {}) {
+	  constructor ({ factory = defaultFactory, maxRedirections = 0, connect, tls, ...options } = {}) {
 	    if (typeof factory !== 'function') {
 	      throw new InvalidArgumentError('factory must be a function.')
 	    }
@@ -12615,11 +12776,15 @@ function requireAgent () {
 	      connect = { ...connect };
 	    }
 
+	    if (tls && typeof tls !== 'function') {
+	      tls = { ...tls };
+	    }
+
 	    this[kInterceptors] = options.interceptors?.Agent && Array.isArray(options.interceptors.Agent)
 	      ? options.interceptors.Agent
 	      : [createRedirectInterceptor({ maxRedirections })];
 
-	    this[kOptions] = { ...util.deepClone(options), connect };
+	    this[kOptions] = { ...util.deepClone(options), connect, tls };
 	    this[kOptions].interceptors = options.interceptors
 	      ? { ...options.interceptors }
 	      : undefined;
@@ -13175,6 +13340,28 @@ function requireRetryHandler () {
 	  return new Date(retryAfter).getTime() - current
 	}
 
+	function validatePartialResponseContentLength (headers, range, statusCode, retryCount) {
+	  const contentLength = headers['content-length'];
+	  if (contentLength == null) {
+	    return null
+	  }
+
+	  if (!Number.isFinite(range.start) || !Number.isFinite(range.end)) {
+	    return null
+	  }
+
+	  const length = Number(contentLength);
+	  const expectedLength = range.end - range.start + 1;
+	  if (!Number.isFinite(length) || length !== expectedLength) {
+	    return new RequestRetryError('Content-Length mismatch', statusCode, {
+	      headers,
+	      data: { count: retryCount }
+	    })
+	  }
+
+	  return null
+	}
+
 	class RetryHandler {
 	  constructor (opts, handlers) {
 	    const { retryOptions, ...dispatchOpts } = opts;
@@ -13228,6 +13415,7 @@ function requireRetryHandler () {
 	    this.end = null;
 	    this.etag = null;
 	    this.resume = null;
+	    this.headersSent = false;
 
 	    // Handle possible onConnect duplication
 	    this.handler.onConnect(reason => {
@@ -13238,6 +13426,20 @@ function requireRetryHandler () {
 	        this.reason = reason;
 	      }
 	    });
+	  }
+
+	  checkpointResponseEnd (headers, resume) {
+	    if (this.end == null && this.opts.method !== 'HEAD') {
+	      const contentLength = headers['content-length'];
+	      this.end = contentLength != null ? Number(contentLength) - 1 : null;
+
+	      assert(
+	        this.end == null || Number.isFinite(this.end),
+	        'invalid content-length'
+	      );
+	    }
+
+	    this.resume = this.end != null ? resume : null;
 	  }
 
 	  onRequestSent () {
@@ -13328,7 +13530,12 @@ function requireRetryHandler () {
 	    this.retryCount += 1;
 
 	    if (statusCode >= 300) {
-	      if (this.retryOpts.statusCodes.includes(statusCode) === false) {
+	      // Only expose a response if no earlier attempt has reached the caller.
+	      // Otherwise abort this attempt so the error settles the existing body
+	      // instead of replacing it with a new response.
+	      if (!this.headersSent && this.retryOpts.statusCodes.includes(statusCode) === false) {
+	        this.headersSent = true;
+	        this.checkpointResponseEnd(headers, resume);
 	        return this.handler.onHeaders(
 	          statusCode,
 	          rawHeaders,
@@ -13389,10 +13596,23 @@ function requireRetryHandler () {
 	        return false
 	      }
 
+	      const contentLengthError = validatePartialResponseContentLength(headers, contentRange, statusCode, this.retryCount);
+	      if (contentLengthError != null) {
+	        this.abort(contentLengthError);
+	        return false
+	      }
+
 	      const { start, size, end = size - 1 } = contentRange;
 
-	      assert(this.start === start, 'content-range mismatch');
-	      assert(this.end == null || this.end === end, 'content-range mismatch');
+	      if (this.start !== start || (this.end != null && this.end !== end)) {
+	        this.abort(
+	          new RequestRetryError('Content-Range mismatch', statusCode, {
+	            headers,
+	            data: { count: this.retryCount }
+	          })
+	        );
+	        return false
+	      }
 
 	      this.resume = resume;
 	      return true
@@ -13404,12 +13624,19 @@ function requireRetryHandler () {
 	        const range = parseRangeHeader(headers['content-range']);
 
 	        if (range == null) {
+	          this.headersSent = true;
 	          return this.handler.onHeaders(
 	            statusCode,
 	            rawHeaders,
 	            resume,
 	            statusMessage
 	          )
+	        }
+
+	        const contentLengthError = validatePartialResponseContentLength(headers, range, statusCode, this.retryCount);
+	        if (contentLengthError != null) {
+	          this.abort(contentLengthError);
+	          return false
 	        }
 
 	        const { start, size, end = size - 1 } = range;
@@ -13436,6 +13663,7 @@ function requireRetryHandler () {
 	      );
 
 	      this.resume = resume;
+	      this.headersSent = true;
 	      this.etag = headers.etag != null ? headers.etag : null;
 
 	      // Weak etags are not useful for comparison nor cache
@@ -13475,7 +13703,7 @@ function requireRetryHandler () {
 	  }
 
 	  onError (err) {
-	    if (this.aborted || isDisturbed(this.opts.body)) {
+	    if (this.aborted || isDisturbed(this.opts.body) || (this.headersSent && this.resume == null)) {
 	      return this.handler.onError(err)
 	    }
 
@@ -21099,8 +21327,10 @@ function requireFetch () {
 	  // 19. Run these steps in parallel:
 
 	  //    1. Run these steps, but abort when fetchParams is canceled:
-	  fetchParams.controller.onAborted = onAborted;
-	  fetchParams.controller.on('terminated', onAborted);
+	  if (!fetchParams.controller.resume) {
+	    fetchParams.controller.on('terminated', onAborted);
+	  }
+
 	  fetchParams.controller.resume = async () => {
 	    // 1. While true
 	    while (true) {
@@ -21269,8 +21499,6 @@ function requireFetch () {
 	          }
 	          location = headersList.get('location', true);
 
-	          this.body = new Readable({ read: resume });
-
 	          const decoders = [];
 
 	          const willFollow = location && request.redirect === 'follow' &&
@@ -21288,7 +21516,7 @@ function requireFetch () {
 	            // CVE fix similar to urllib3 (GHSA-gm62-xv2j-4w53) and curl (CVE-2022-32206).
 	            const maxContentEncodings = 5;
 	            if (codings.length > maxContentEncodings) {
-	              reject(new Error(`too many content-encodings in response: ${codings.length}, maximum allowed is ${maxContentEncodings}`));
+	              this.abort(new Error(`too many content-encodings in response: ${codings.length}, maximum allowed is ${maxContentEncodings}`));
 	              return true
 	            }
 
@@ -21320,6 +21548,8 @@ function requireFetch () {
 	              }
 	            }
 	          }
+
+	          this.body = new Readable({ read: resume });
 
 	          const onError = this.onError.bind(this);
 
@@ -21365,10 +21595,6 @@ function requireFetch () {
 	        onComplete () {
 	          if (this.abort) {
 	            fetchParams.controller.off('terminated', this.abort);
-	          }
-
-	          if (fetchParams.controller.onAborted) {
-	            fetchParams.controller.off('terminated', fetchParams.controller.onAborted);
 	          }
 
 	          fetchParams.controller.ended = true;
@@ -23800,7 +24026,7 @@ function requireUtil$3 () {
 
 	    if (
 	      code < 0x20 || // exclude CTLs (0-31)
-	      code === 0x7F || // DEL
+	      code > 0x7E || // exclude DEL and non-ascii
 	      code === 0x3B // ;
 	    ) {
 	      throw new Error('Invalid cookie path')
@@ -23809,16 +24035,80 @@ function requireUtil$3 () {
 	}
 
 	/**
-	 * I have no idea why these values aren't allowed to be honest,
-	 * but Deno tests these. - Khafra
+	 * <let-dig> ::= <letter> | <digit>
+	 *
+	 * <letter> ::= any one of the 52 alphabetic characters A through Z in
+	 * upper case and a through z in lower case
+	 *
+	 * <digit> ::= any one of the ten digits 0 through 9r
+	 *
+	 * @see https://www.rfc-editor.org/rfc/rfc1034#section-3.5
+	 * @param {number} code
+	 */
+	function isLetterOrDigit (code) {
+	  return (
+	    (code >= 0x30 && code <= 0x39) || // 0-9
+	    (code >= 0x41 && code <= 0x5A) || // A-Z
+	    (code >= 0x61 && code <= 0x7A) // a-z
+	  )
+	}
+
+	/**
+	 * Validates a cookie domain against the "preferred name syntax".
+	 *
+	 * <domain>      ::= <subdomain> | " "
+	 * <subdomain>   ::= <label> | <subdomain> "." <label>
+	 * <label>       ::= <let-dig> [ [ <ldh-str> ] <let-dig> ]
+	 * <ldh-str>     ::= <let-dig-hyp> | <let-dig-hyp> <ldh-str>
+	 * <let-dig-hyp> ::= <let-dig> | "-"
+	 *
+	 * @see https://www.rfc-editor.org/rfc/rfc1034#section-3.5
+	 * @see https://www.rfc-editor.org/rfc/rfc1123#section-2.1
+	 * @see https://www.rfc-editor.org/rfc/rfc1035#section-2.3.4
 	 * @param {string} domain
 	 */
 	function validateCookieDomain (domain) {
-	  if (
-	    domain.startsWith('-') ||
-	    domain.endsWith('.') ||
-	    domain.endsWith('-')
-	  ) {
+	  // <domain> ::= <subdomain> | " "
+	  if (domain === ' ') {
+	    return
+	  }
+
+	  if (domain.length > 255) {
+	    throw new Error('Invalid cookie domain')
+	  }
+
+	  let labelLength = 0;
+
+	  for (let i = 0; i < domain.length; ++i) {
+	    const code = domain.charCodeAt(i);
+
+	    if (code === 0x2E) {
+	      if (labelLength === 0) {
+	        throw new Error('Invalid cookie domain')
+	      }
+
+	      if (domain.charCodeAt(i - 1) === 0x2D) { // "-"
+	        throw new Error('Invalid cookie domain')
+	      }
+
+	      labelLength = 0;
+	      continue
+	    }
+
+	    if (labelLength === 0 && !isLetterOrDigit(code)) {
+	      throw new Error('Invalid cookie domain')
+	    }
+
+	    if (!isLetterOrDigit(code) && code !== 0x2D) { // "-"
+	      throw new Error('Invalid cookie domain')
+	    }
+
+	    if (++labelLength > 63) {
+	      throw new Error('Invalid cookie domain')
+	    }
+	  }
+
+	  if (labelLength === 0 || domain.charCodeAt(domain.length - 1) === 0x2D) { // "-"
 	    throw new Error('Invalid cookie domain')
 	  }
 	}
@@ -23961,7 +24251,13 @@ function requireUtil$3 () {
 
 	    const [key, ...value] = part.split('=');
 
-	    out.push(`${key.trim()}=${value.join('=')}`);
+	    const trimmedKey = key.trim();
+	    const joinedValue = value.join('=');
+
+	    validateCookieName(trimmedKey);
+	    validateCookieValue(joinedValue);
+
+	    out.push(`${trimmedKey}=${joinedValue}`);
 	  }
 
 	  return out.join('; ')
@@ -25552,7 +25848,7 @@ function requireConnection () {
 	        // is specified, the server needs to include the same field and one of
 	        // the selected subprotocol values in its response for the connection to
 	        // be established.
-	        if (!requestProtocols.includes(secProtocol)) {
+	        if (requestProtocols === null || !requestProtocols.includes(secProtocol)) {
 	          failWebsocketConnection(ws, 'Protocol was not set in the opening handshake.');
 	          return
 	        }
@@ -25799,7 +26095,12 @@ function requirePermessageDeflate () {
 
 	        if (this.#maxPayloadSize > 0 && this.#inflate[kLength] > this.#maxPayloadSize) {
 	          callback(new MessageSizeExceededError());
+	          // The inflater may still hold buffered input that can emit a late
+	          // zlib error. Remove the data listener, then deterministically stop
+	          // the stream so a subsequent 'error' cannot fire without a listener
+	          // (which would terminate the process as an unhandled error event).
 	          this.#inflate.removeAllListeners();
+	          this.#inflate.destroy();
 	          this.#inflate = null;
 	          return
 	        }
@@ -26093,6 +26394,20 @@ function requireReceiver () {
 	        if (isControlFrame(this.#info.opcode)) {
 	          this.#loop = this.parseControlFrame(body);
 	          this.#state = parserStates.INFO;
+
+	          // If the automatic PONG/CLOSE reply filled the socket's write buffer,
+	          // stop parsing and resume on drain so a PING flood cannot grow the
+	          // outbound queue without bound.
+	          const socket = this.ws[kResponse].socket;
+	          if (this.#loop && socket.writableNeedDrain) {
+	            this.#loop = false;
+	            socket.once('drain', () => {
+	              if (this.destroyed) return
+	              this.#loop = true;
+	              this.run(callback);
+	            });
+	            return
+	          }
 	        } else {
 	          if (!this.#info.compressed) {
 	            if (!this.writeFragments(body)) {
@@ -27124,6 +27439,7 @@ var hasRequiredEventsourceStream;
 function requireEventsourceStream () {
 	if (hasRequiredEventsourceStream) return eventsourceStream;
 	hasRequiredEventsourceStream = 1;
+	const buffer = require$$0;
 	const { Transform } = require$$0$2;
 	const { isASCIINumber, isValidLastEventId } = requireUtil$1();
 
@@ -27147,6 +27463,63 @@ function requireEventsourceStream () {
 	 * @type {32} SPACE
 	 */
 	const SPACE = 0x20;
+
+	const defaultMaxEventSize = buffer.kStringMaxLength;
+
+	const DATA = Buffer.from('data');
+	const EVENT = Buffer.from('event');
+	const ID = Buffer.from('id');
+	const RETRY = Buffer.from('retry');
+
+	// Each data field creates a string node, and each unconsumed input chunk keeps
+	// a Buffer wrapper. The absolute ceiling protects the large default byte limit.
+	const minParserItems = 1024;
+	const maxParserItems = 131072;
+	const bytesPerParserItem = 128;
+
+	function isASCIINumberBytes (buffer, start) {
+	  if (start >= buffer.length) {
+	    return false
+	  }
+
+	  for (let i = start; i < buffer.length; i++) {
+	    if (buffer[i] < 0x30 || buffer[i] > 0x39) {
+	      return false
+	    }
+	  }
+
+	  return true
+	}
+
+	function isValidLastEventIdBytes (buffer, start) {
+	  for (let i = start; i < buffer.length; i++) {
+	    if (buffer[i] === 0x00) {
+	      return false
+	    }
+	  }
+
+	  return true
+	}
+
+	function isFieldName (line, length, field) {
+	  if (length !== field.length) {
+	    return false
+	  }
+
+	  for (let i = 0; i < length; i++) {
+	    if (line[i] !== field[i]) {
+	      return false
+	    }
+	  }
+
+	  return true
+	}
+
+	function createMaxEventSizeExceededError () {
+	  const error = new Error('EventSource message size exceeded');
+	  error.aborted = false;
+	  return error
+	}
 
 	/**
 	 * @typedef {object} EventSourceStreamEvent
@@ -27188,11 +27561,21 @@ function requireEventsourceStream () {
 	  eventEndCheck = false
 
 	  /**
-	   * @type {Buffer}
+	   * @type {Buffer[]}
 	   */
-	  buffer = null
+	  chunks = []
 
+	  chunkIndex = 0
 	  pos = 0
+	  lineChunkIndex = 0
+	  linePos = 0
+	  lineLength = 0
+	  eventSize = 0
+	  eventFieldSizes = { data: 0, event: 0, id: 0, retry: 0 }
+	  dataLineCount = 0
+	  maxEventSize
+	  maxDataLines
+	  maxBufferedChunks
 
 	  event = {
 	    data: undefined,
@@ -27203,6 +27586,7 @@ function requireEventsourceStream () {
 
 	  /**
 	   * @param {object} options
+	   * @param {number} [options.maxEventSize]
 	   * @param {eventSourceSettings} options.eventSourceSettings
 	   * @param {Function} [options.push]
 	   */
@@ -27214,6 +27598,12 @@ function requireEventsourceStream () {
 	    super(options);
 
 	    this.state = options.eventSourceSettings || {};
+	    this.maxEventSize = options.maxEventSize ?? defaultMaxEventSize;
+	    const parserItemLimit = this.maxEventSize > 0
+	      ? Math.min(maxParserItems, Math.max(minParserItems, Math.floor(this.maxEventSize / bytesPerParserItem)))
+	      : 0;
+	    this.maxDataLines = parserItemLimit;
+	    this.maxBufferedChunks = parserItemLimit;
 	    if (options.push) {
 	      this.push = options.push;
 	    }
@@ -27231,92 +27621,28 @@ function requireEventsourceStream () {
 	      return
 	    }
 
-	    // Cache the chunk in the buffer, as the data might not be complete while
-	    // processing it
-	    // TODO: Investigate if there is a more performant way to handle
-	    // incoming chunks
-	    // see: https://github.com/nodejs/undici/issues/2630
-	    if (this.buffer) {
-	      this.buffer = Buffer.concat([this.buffer, chunk]);
-	    } else {
-	      this.buffer = chunk;
+	    // A leading line ending can immediately release the currently buffered
+	    // line, even when it uses the final allowed chunk slot.
+	    if (this.maxEventSize > 0 &&
+	        this.chunks.length >= this.maxBufferedChunks &&
+	        chunk[0] !== LF && chunk[0] !== CR) {
+	      callback(createMaxEventSizeExceededError());
+	      return
 	    }
+	    this.chunks.push(chunk);
 
 	    // Strip leading byte-order-mark if we opened the stream and started
 	    // the processing of the incoming data
 	    if (this.checkBOM) {
-	      switch (this.buffer.length) {
-	        case 1:
-	          // Check if the first byte is the same as the first byte of the BOM
-	          if (this.buffer[0] === BOM[0]) {
-	            // If it is, we need to wait for more data
-	            callback();
-	            return
-	          }
-	          // Set the checkBOM flag to false as we don't need to check for the
-	          // BOM anymore
-	          this.checkBOM = false;
-
-	          // The buffer only contains one byte so we need to wait for more data
-	          callback();
-	          return
-	        case 2:
-	          // Check if the first two bytes are the same as the first two bytes
-	          // of the BOM
-	          if (
-	            this.buffer[0] === BOM[0] &&
-	            this.buffer[1] === BOM[1]
-	          ) {
-	            // If it is, we need to wait for more data, because the third byte
-	            // is needed to determine if it is the BOM or not
-	            callback();
-	            return
-	          }
-
-	          // Set the checkBOM flag to false as we don't need to check for the
-	          // BOM anymore
-	          this.checkBOM = false;
-	          break
-	        case 3:
-	          // Check if the first three bytes are the same as the first three
-	          // bytes of the BOM
-	          if (
-	            this.buffer[0] === BOM[0] &&
-	            this.buffer[1] === BOM[1] &&
-	            this.buffer[2] === BOM[2]
-	          ) {
-	            // If it is, we can drop the buffered data, as it is only the BOM
-	            this.buffer = Buffer.alloc(0);
-	            // Set the checkBOM flag to false as we don't need to check for the
-	            // BOM anymore
-	            this.checkBOM = false;
-
-	            // Await more data
-	            callback();
-	            return
-	          }
-	          // If it is not the BOM, we can start processing the data
-	          this.checkBOM = false;
-	          break
-	        default:
-	          // The buffer is longer than 3 bytes, so we can drop the BOM if it is
-	          // present
-	          if (
-	            this.buffer[0] === BOM[0] &&
-	            this.buffer[1] === BOM[1] &&
-	            this.buffer[2] === BOM[2]
-	          ) {
-	            // Remove the BOM from the buffer
-	            this.buffer = this.buffer.subarray(3);
-	          }
-
-	          // Set the checkBOM flag to false as we don't need to check for the
-	          this.checkBOM = false;
-	          break
+	      if (this.handleBOM()) {
+	        callback();
+	        return
 	      }
 	    }
 
-	    while (this.pos < this.buffer.length) {
+	    while (this.hasCurrentByte()) {
+	      const byte = this.currentByte();
+
 	      // If the previous line ended with an end-of-line, we need to check
 	      // if the next character is also an end-of-line.
 	      if (this.eventEndCheck) {
@@ -27329,10 +27655,9 @@ function requireEventsourceStream () {
 	        if (this.crlfCheck) {
 	          // If the current character is a line feed, we can remove it
 	          // from the buffer and reset the crlfCheck flag
-	          if (this.buffer[this.pos] === LF) {
-	            this.buffer = this.buffer.subarray(this.pos + 1);
-	            this.pos = 0;
+	          if (byte === LF) {
 	            this.crlfCheck = false;
+	            this.consumeCurrentByte();
 
 	            // It is possible that the line feed is not the end of the
 	            // event. We need to check if the next character is an
@@ -27348,19 +27673,17 @@ function requireEventsourceStream () {
 	          this.crlfCheck = false;
 	        }
 
-	        if (this.buffer[this.pos] === LF || this.buffer[this.pos] === CR) {
+	        if (byte === LF || byte === CR) {
 	          // If the current character is a carriage return, we need to
 	          // set the crlfCheck flag to true, as we need to check if the
 	          // next character is a line feed so we can remove it from the
 	          // buffer
-	          if (this.buffer[this.pos] === CR) {
+	          if (byte === CR) {
 	            this.crlfCheck = true;
 	          }
 
-	          this.buffer = this.buffer.subarray(this.pos + 1);
-	          this.pos = 0;
-	          if (
-	            this.event.data !== undefined || this.event.event || this.event.id || this.event.retry) {
+	          this.consumeCurrentByte();
+	          if (this.hasPendingEvent()) {
 	            this.processEvent(this.event);
 	          }
 	          this.clearEvent();
@@ -27374,22 +27697,23 @@ function requireEventsourceStream () {
 
 	      // If the current character is an end-of-line, we can process the
 	      // line
-	      if (this.buffer[this.pos] === LF || this.buffer[this.pos] === CR) {
+	      if (byte === LF || byte === CR) {
 	        // If the current character is a carriage return, we need to
 	        // set the crlfCheck flag to true, as we need to check if the
 	        // next character is a line feed
-	        if (this.buffer[this.pos] === CR) {
+	        if (byte === CR) {
 	          this.crlfCheck = true;
 	        }
 
 	        // In any case, we can process the line as we reached an
 	        // end-of-line character
-	        this.parseLine(this.buffer.subarray(0, this.pos), this.event);
-
-	        // Remove the processed line from the buffer
-	        this.buffer = this.buffer.subarray(this.pos + 1);
-	        // Reset the position as we removed the processed line from the buffer
-	        this.pos = 0;
+	        try {
+	          this.parseLine(this.readLine(), this.event);
+	        } catch (error) {
+	          callback(error);
+	          return
+	        }
+	        this.consumeCurrentByte();
 	        // A line was processed and this could be the end of the event. We need
 	        // to check if the next line is empty to determine if the event is
 	        // finished.
@@ -27397,15 +27721,28 @@ function requireEventsourceStream () {
 	        continue
 	      }
 
-	      this.pos++;
+	      // readLine() is only called after CR or LF. Reject an unfinished line
+	      // before it can retain an unbounded number of decoded chunks. The seven
+	      // extra bytes allow the longest field prefix ("event: " or "retry: ").
+	      if (this.maxEventSize > 0 && ++this.lineLength > this.maxEventSize + 7) {
+	        callback(createMaxEventSizeExceededError());
+	        return
+	      }
+	      this.advanceCursor();
 	    }
 
 	    callback();
 	  }
 
+	  _destroy (error, callback) {
+	    this.chunks.length = 0;
+	    this.clearEvent();
+	    super._destroy(error, callback);
+	  }
+
 	  /**
 	   * @param {Buffer} line
-	   * @param {EventStreamEvent} event
+	   * @param {EventSourceStreamEvent} event
 	   */
 	  parseLine (line, event) {
 	    // If the line is empty (a blank line)
@@ -27422,65 +27759,72 @@ function requireEventsourceStream () {
 	      return
 	    }
 
-	    let field = '';
-	    let value = '';
+	    let fieldLength = line.length;
+	    let valueStart = line.length;
 
 	    // If the line contains a U+003A COLON character (:)
 	    if (colonPosition !== -1) {
-	      // Collect the characters on the line before the first U+003A COLON
-	      // character (:), and let field be that string.
-	      // TODO: Investigate if there is a more performant way to extract the
-	      // field
-	      // see: https://github.com/nodejs/undici/issues/2630
-	      field = line.subarray(0, colonPosition).toString('utf8');
+	      fieldLength = colonPosition;
 
 	      // Collect the characters on the line after the first U+003A COLON
 	      // character (:), and let value be that string.
 	      // If value starts with a U+0020 SPACE character, remove it from value.
-	      let valueStart = colonPosition + 1;
+	      valueStart = colonPosition + 1;
 	      if (line[valueStart] === SPACE) {
 	        ++valueStart;
 	      }
-	      // TODO: Investigate if there is a more performant way to extract the
-	      // value
-	      // see: https://github.com/nodejs/undici/issues/2630
-	      value = line.subarray(valueStart).toString('utf8');
-
-	      // Otherwise, the string is not empty but does not contain a U+003A COLON
-	      // character (:)
-	    } else {
-	      // Process the field using the steps described below, using the whole
-	      // line as the field name, and the empty string as the field value.
-	      field = line.toString('utf8');
-	      value = '';
 	    }
 
-	    // Modify the event with the field name and value. The value is also
-	    // decoded as UTF-8
-	    switch (field) {
-	      case 'data':
-	        if (event[field] === undefined) {
-	          event[field] = value;
-	        } else {
-	          event[field] += `\n${value}`;
-	        }
-	        break
-	      case 'retry':
-	        if (isASCIINumber(value)) {
-	          event[field] = value;
-	        }
-	        break
-	      case 'id':
-	        if (isValidLastEventId(value)) {
-	          event[field] = value;
-	        }
-	        break
-	      case 'event':
-	        if (value.length > 0) {
-	          event[field] = value;
-	        }
-	        break
+	    if (isFieldName(line, fieldLength, DATA)) {
+	      if (this.maxEventSize > 0 && this.dataLineCount >= this.maxDataLines) {
+	        throw createMaxEventSizeExceededError()
+	      }
+	      const valueBytes = line.length - valueStart;
+	      const dataSize = this.eventFieldSizes.data + (event.data === undefined ? 0 : 1) + valueBytes;
+	      this.setEventFieldSize('data', dataSize);
+
+	      const value = line.toString('utf8', valueStart);
+
+	      if (event.data === undefined) {
+	        event.data = value;
+	      } else {
+	        event.data += `\n${value}`;
+	      }
+	      this.dataLineCount++;
+	      return
 	    }
+
+	    if (isFieldName(line, fieldLength, RETRY)) {
+	      if (isASCIINumberBytes(line, valueStart)) {
+	        this.setEventFieldSize('retry', line.length - valueStart);
+	        event.retry = line.toString('utf8', valueStart);
+	      }
+	      return
+	    }
+
+	    if (isFieldName(line, fieldLength, ID)) {
+	      if (isValidLastEventIdBytes(line, valueStart)) {
+	        this.setEventFieldSize('id', line.length - valueStart);
+	        event.id = line.toString('utf8', valueStart);
+	      }
+	      return
+	    }
+
+	    if (isFieldName(line, fieldLength, EVENT)) {
+	      if (valueStart < line.length) {
+	        this.setEventFieldSize('event', line.length - valueStart);
+	        event.event = line.toString('utf8', valueStart);
+	      }
+	    }
+	  }
+
+	  setEventFieldSize (field, size) {
+	    const eventSize = this.eventSize - this.eventFieldSizes[field] + size;
+	    if (this.maxEventSize > 0 && eventSize > this.maxEventSize) {
+	      throw createMaxEventSizeExceededError()
+	    }
+	    this.eventSize = eventSize;
+	    this.eventFieldSizes[field] = size;
 	  }
 
 	  /**
@@ -27509,12 +27853,159 @@ function requireEventsourceStream () {
 	  }
 
 	  clearEvent () {
-	    this.event = {
-	      data: undefined,
-	      event: undefined,
-	      id: undefined,
-	      retry: undefined
-	    };
+	    this.event.data = undefined;
+	    this.event.event = undefined;
+	    this.event.id = undefined;
+	    this.event.retry = undefined;
+	    this.eventSize = 0;
+	    this.dataLineCount = 0;
+	    this.eventFieldSizes.data = 0;
+	    this.eventFieldSizes.event = 0;
+	    this.eventFieldSizes.id = 0;
+	    this.eventFieldSizes.retry = 0;
+	  }
+
+	  hasPendingEvent () {
+	    return this.event.data !== undefined ||
+	      this.event.event !== undefined ||
+	      this.event.id !== undefined ||
+	      this.event.retry !== undefined
+	  }
+
+	  hasCurrentByte () {
+	    return this.chunkIndex < this.chunks.length &&
+	      this.pos < this.chunks[this.chunkIndex].length
+	  }
+
+	  currentByte () {
+	    return this.chunks[this.chunkIndex][this.pos]
+	  }
+
+	  consumeCurrentByte () {
+	    this.advanceCursor();
+	    this.syncLineStartToCursor();
+	  }
+
+	  advanceCursor () {
+	    this.pos++;
+
+	    while (this.chunkIndex < this.chunks.length && this.pos >= this.chunks[this.chunkIndex].length) {
+	      this.chunkIndex++;
+	      this.pos = 0;
+	    }
+	  }
+
+	  syncLineStartToCursor () {
+	    this.lineChunkIndex = this.chunkIndex;
+	    this.linePos = this.pos;
+	    this.lineLength = 0;
+	    this.dropConsumedChunks();
+	  }
+
+	  dropConsumedChunks () {
+	    if (this.lineChunkIndex > 0) {
+	      const consumed = this.lineChunkIndex;
+	      this.chunks.splice(0, consumed);
+	      this.lineChunkIndex = 0;
+	      this.chunkIndex -= consumed;
+	    }
+
+	    if (this.chunkIndex === this.chunks.length) {
+	      this.chunks.length = 0;
+	      this.chunkIndex = 0;
+	      this.pos = 0;
+	      this.lineChunkIndex = 0;
+	      this.linePos = 0;
+	    }
+	  }
+
+	  readLine () {
+	    if (this.lineChunkIndex === this.chunkIndex) {
+	      return this.chunks[this.chunkIndex].subarray(this.linePos, this.pos)
+	    }
+
+	    const chunks = [];
+	    let length = 0;
+
+	    for (let i = this.lineChunkIndex; i <= this.chunkIndex; i++) {
+	      const chunk = this.chunks[i];
+	      const start = i === this.lineChunkIndex ? this.linePos : 0;
+	      const end = i === this.chunkIndex ? this.pos : chunk.length;
+	      const slice = chunk.subarray(start, end);
+	      length += slice.length;
+	      chunks.push(slice);
+	    }
+
+	    return Buffer.concat(chunks, length)
+	  }
+
+	  peekBufferedByte (offset) {
+	    let chunkIndex = this.lineChunkIndex;
+	    let pos = this.linePos;
+
+	    while (chunkIndex < this.chunks.length) {
+	      const chunk = this.chunks[chunkIndex];
+	      const remaining = chunk.length - pos;
+
+	      if (offset < remaining) {
+	        return chunk[pos + offset]
+	      }
+
+	      offset -= remaining;
+	      chunkIndex++;
+	      pos = 0;
+	    }
+	  }
+
+	  discardLeadingBytes (count) {
+	    while (count > 0 && this.lineChunkIndex < this.chunks.length) {
+	      const chunk = this.chunks[this.lineChunkIndex];
+	      const remaining = chunk.length - this.linePos;
+
+	      if (count < remaining) {
+	        this.linePos += count;
+	        count = 0;
+	      } else {
+	        count -= remaining;
+	        this.lineChunkIndex++;
+	        this.linePos = 0;
+	      }
+	    }
+
+	    this.chunkIndex = this.lineChunkIndex;
+	    this.pos = this.linePos;
+	    this.dropConsumedChunks();
+	  }
+
+	  handleBOM () {
+	    const first = this.peekBufferedByte(0);
+	    const second = this.peekBufferedByte(1);
+	    const third = this.peekBufferedByte(2);
+
+	    if (second === undefined) {
+	      if (first === BOM[0]) {
+	        return true
+	      }
+
+	      this.checkBOM = false;
+	      return true
+	    }
+
+	    if (third === undefined) {
+	      if (first === BOM[0] && second === BOM[1]) {
+	        return true
+	      }
+
+	      this.checkBOM = false;
+	      return false
+	    }
+
+	    if (first === BOM[0] && second === BOM[1] && third === BOM[2]) {
+	      this.discardLeadingBytes(3);
+	    }
+
+	    this.checkBOM = false;
+	    return !this.hasCurrentByte()
 	  }
 	}
 
@@ -27542,6 +28033,7 @@ function requireEventsource () {
 	const { delay } = requireUtil$1();
 	const { kEnumerableProperty } = requireUtil$8();
 	const { environmentSettingsObject } = requireUtil$7();
+	const { getGlobalDispatcher } = requireGlobal();
 
 	let experimentalWarned = false;
 
@@ -27823,6 +28315,7 @@ function requireEventsource () {
 
 	      const eventSourceStream = new EventSourceStream({
 	        eventSourceSettings: this.#state,
+	        maxEventSize: this.#dispatcher.eventSourceOptions?.maxEventSize,
 	        push: (event) => {
 	          this.dispatchEvent(createFastMessageEvent(
 	            event.type,
@@ -28001,7 +28494,8 @@ function requireEventsource () {
 	  },
 	  {
 	    key: 'dispatcher', // undici only
-	    converter: webidl.converters.any
+	    converter: webidl.converters.any,
+	    defaultValue: () => getGlobalDispatcher()
 	  }
 	]);
 
@@ -33155,6 +33649,7 @@ function requireErrors () {
 		    /* ZipEntry error messages*/
 		    NO_DATA: "Nothing to decompress",
 		    BAD_CRC: "CRC32 checksum failed {0}",
+		    MAX_OUTPUT_EXCEEDED: "Decompressed data exceeds the declared uncompressed size",
 		    FILE_IN_THE_WAY: "There is a file in the way: {0}",
 		    UNKNOWN_METHOD: "Invalid/unsupported compression method",
 
@@ -33176,11 +33671,13 @@ function requireErrors () {
 		    DISK_ENTRY_TOO_LARGE: "Number of disk entries is too large",
 		    NO_ZIP: "No zip file was loaded",
 		    NO_ENTRY: "Entry doesn't exist",
+		    DUPLICATE_ENTRY: "Duplicate entry name {0}",
 		    DIRECTORY_CONTENT_ERROR: "A directory cannot have content",
 		    FILE_NOT_FOUND: 'File not found: "{0}"',
 		    NOT_IMPLEMENTED: "Not implemented",
 		    INVALID_FILENAME: "Invalid filename",
 		    INVALID_FORMAT: "Invalid or unsupported zip format. No END header found",
+		    ZIP64_VALUE_TOO_LARGE: "Zip64 value exceeds the maximum safe integer",
 		    INVALID_PASS_PARAM: "Incompatible password parameter",
 		    WRONG_PASSWORD: "Wrong Password",
 
@@ -33323,39 +33820,51 @@ function requireUtils () {
 	        if (exist && !overwrite) return callback(false);
 
 	        self.fs.stat(path, function (err, stat) {
-	            if (exist && stat.isDirectory()) {
+	            if (exist && stat && stat.isDirectory()) {
 	                return callback(false);
 	            }
 
 	            var folder = pth.dirname(path);
 	            self.fs.exists(folder, function (exists) {
-	                if (!exists) self.makeDir(folder);
+	                if (!exists) {
+	                    // makeDir is synchronous and can throw (e.g. EACCES); report failure
+	                    // rather than letting it escape this callback as an uncaught exception
+	                    try {
+	                        self.makeDir(folder);
+	                    } catch (e) {
+	                        return callback(false);
+	                    }
+	                }
+
+	                // write the content to an open descriptor, then apply the attributes
+	                const writeToFd = function (fd) {
+	                    self.fs.write(fd, content, 0, content.length, 0, function (writeErr) {
+	                        self.fs.close(fd, function () {
+	                            // surface write failures instead of silently reporting success (issue #402)
+	                            if (writeErr) return callback(false);
+	                            self.fs.chmod(path, attr || 0o666, function () {
+	                                callback(true);
+	                            });
+	                        });
+	                    });
+	                };
 
 	                self.fs.open(path, "w", 0o666, function (err, fd) {
 	                    if (err) {
+	                        // the target may exist but be read-only: make it writable and retry once
 	                        self.fs.chmod(path, 0o666, function () {
-	                            self.fs.open(path, "w", 0o666, function (err, fd) {
-	                                self.fs.write(fd, content, 0, content.length, 0, function () {
-	                                    self.fs.close(fd, function () {
-	                                        self.fs.chmod(path, attr || 0o666, function () {
-	                                            callback(true);
-	                                        });
-	                                    });
-	                                });
+	                            self.fs.open(path, "w", 0o666, function (retryErr, fd) {
+	                                // Previously the retry error was ignored and an undefined fd was
+	                                // passed to fs.write, throwing an uncaught ERR_INVALID_ARG_TYPE that
+	                                // crashed the process (issues #470, #459, #402). Report failure instead.
+	                                if (retryErr || !fd) return callback(false);
+	                                writeToFd(fd);
 	                            });
 	                        });
 	                    } else if (fd) {
-	                        self.fs.write(fd, content, 0, content.length, 0, function () {
-	                            self.fs.close(fd, function () {
-	                                self.fs.chmod(path, attr || 0o666, function () {
-	                                    callback(true);
-	                                });
-	                            });
-	                        });
+	                        writeToFd(fd);
 	                    } else {
-	                        self.fs.chmod(path, attr || 0o666, function () {
-	                            callback(true);
-	                        });
+	                        callback(false);
 	                    }
 	                });
 	            });
@@ -33363,25 +33872,89 @@ function requireUtils () {
 	    });
 	};
 
+	// Guard extraction against writing through a symlink that already exists inside
+	// the target directory. sanitize() only proves the textual path stays under the
+	// root; it cannot see that a component on disk is a symlink pointing elsewhere,
+	// so open()/mkdir() would follow it and write outside the root. Walk every path
+	// component strictly below root and reject any that is a symlink. Components at
+	// or above root are the caller's own choice and are left untouched, so a root
+	// that itself lives under a symlink (e.g. /tmp on macOS) still extracts.
+	Utils.prototype.assertPathSafe = function (/*String*/ root, /*String*/ target) {
+	    const self = this;
+	    if (typeof self.fs.lstatSync !== "function") return;
+
+	    const resolvedRoot = pth.resolve(root);
+	    const resolvedTarget = pth.resolve(target);
+	    if (resolvedTarget === resolvedRoot) return;
+
+	    const rel = pth.relative(resolvedRoot, resolvedTarget);
+	    // Not under root: sanitize() is responsible for that case; nothing to walk.
+	    if (!rel || rel === ".." || rel.startsWith(".." + pth.sep) || pth.isAbsolute(rel)) return;
+
+	    let cur = resolvedRoot;
+	    for (const part of rel.split(pth.sep)) {
+	        if (!part || part === ".") continue;
+	        cur = pth.join(cur, part);
+	        let stat;
+	        try {
+	            stat = self.fs.lstatSync(cur);
+	        } catch (e) {
+	            break; // component does not exist yet: nothing below it can be a symlink
+	        }
+	        if (stat.isSymbolicLink()) throw Errors.FILE_IN_THE_WAY(`"${cur}"`);
+	    }
+	};
+
 	Utils.prototype.findFiles = function (/*String*/ path) {
 	    const self = this;
+	    const canLstat = typeof self.fs.lstatSync === "function";
+	    const rootReal = self.fs.realpathSync(path);
 
-	    function findSync(/*String*/ dir, /*RegExp*/ pattern, /*Boolean*/ recursive) {
+	    // A symlink whose target lies outside the folder being archived must not be
+	    // followed: statSync would dereference it and copy the target's contents into
+	    // the archive, disclosing files outside the root (GHSA-wx42-xcp7-pgr4). Allow
+	    // symlinks that resolve to a location inside the root, reject any that escape.
+	    function escapesRoot(/*String*/ p) {
+	        if (!canLstat) return false;
+	        if (!self.fs.lstatSync(p).isSymbolicLink()) return false;
+	        let real;
+	        try {
+	            real = self.fs.realpathSync(p);
+	        } catch (e) {
+	            return true; // dangling or unresolvable symlink: do not follow
+	        }
+	        return !(real === rootReal || real.startsWith(rootReal + pth.sep));
+	    }
+
+	    function findSync(/*String*/ dir, /*RegExp*/ pattern, /*Boolean*/ recursive, /*Set*/ visited) {
 	        let files = [];
 	        self.fs.readdirSync(dir).forEach(function (file) {
 	            const path = pth.join(dir, file);
+
+	            if (escapesRoot(path)) return;
+
 	            const stat = self.fs.statSync(path);
 
 	            {
 	                files.push(pth.normalize(path) + (stat.isDirectory() ? self.sep : ""));
 	            }
 
-	            if (stat.isDirectory() && recursive) files = files.concat(findSync(path, pattern, recursive));
+	            if (stat.isDirectory() && recursive) {
+	                // Descend by resolved real path and skip directories we have already
+	                // visited. This stops a symlink that points back to an ancestor from
+	                // recursing forever until the path fails with ELOOP / ENAMETOOLONG
+	                // (issue #541).
+	                const realDir = self.fs.realpathSync(path);
+	                if (!visited.has(realDir)) {
+	                    visited.add(realDir);
+	                    files = files.concat(findSync(path, pattern, recursive, visited));
+	                }
+	            }
 	        });
 	        return files;
 	    }
 
-	    return findSync(path, undefined, true);
+	    return findSync(path, undefined, true, new Set([rootReal]));
 	};
 
 	/**
@@ -33399,29 +33972,81 @@ function requireUtils () {
 	 */
 	Utils.prototype.findFilesAsync = function (dir, cb) {
 	    const self = this;
-	    let results = [];
-	    self.fs.readdir(dir, function (err, list) {
-	        if (err) return cb(err);
-	        let list_length = list.length;
-	        if (!list_length) return cb(null, results);
-	        list.forEach(function (file) {
-	            file = pth.join(dir, file);
-	            self.fs.stat(file, function (err, stat) {
-	                if (err) return cb(err);
-	                if (stat) {
-	                    results.push(pth.normalize(file) + (stat.isDirectory() ? self.sep : ""));
-	                    if (stat.isDirectory()) {
-	                        self.findFilesAsync(file, function (err, res) {
-	                            if (err) return cb(err);
-	                            results = results.concat(res);
-	                            if (!--list_length) cb(null, results);
-	                        });
-	                    } else {
-	                        if (!--list_length) cb(null, results);
-	                    }
-	                }
+	    const results = [];
+	    let finished = false;
+	    const finish = function (err) {
+	        if (finished) return;
+	        finished = true;
+	        cb(err, err ? undefined : results);
+	    };
+
+	    const canLstat = typeof self.fs.lstat === "function";
+	    let rootReal = null;
+
+	    // Reject a symlink whose target escapes the root being archived, so its
+	    // contents are not dereferenced and copied into the archive
+	    // (GHSA-wx42-xcp7-pgr4). A symlink resolving to a location inside the root is
+	    // allowed; a dangling or escaping one is skipped. Calls back (err, escapes).
+	    const escapesRoot = function (file, cb) {
+	        if (!canLstat) return cb(null, false);
+	        self.fs.lstat(file, function (err, lst) {
+	            if (err) return cb(err);
+	            if (!lst || !lst.isSymbolicLink()) return cb(null, false);
+	            self.fs.realpath(file, function (err, real) {
+	                if (err) return cb(null, true); // dangling: do not follow
+	                cb(null, !(real === rootReal || real.startsWith(rootReal + pth.sep)));
 	            });
 	        });
+	    };
+
+	    // Descend by resolved real path and skip directories already visited, so a
+	    // symlink pointing back to an ancestor cannot recurse forever (issue #541).
+	    const walk = function (dir, visited, done) {
+	        self.fs.readdir(dir, function (err, list) {
+	            if (err) return done(err);
+	            let pending = list.length;
+	            if (!pending) return done();
+	            list.forEach(function (name) {
+	                const file = pth.join(dir, name);
+	                escapesRoot(file, function (err, escapes) {
+	                    if (err) return done(err);
+	                    if (escapes) {
+	                        if (!--pending) done();
+	                        return;
+	                    }
+	                    self.fs.stat(file, function (err, stat) {
+	                        if (err) return done(err);
+	                        if (!stat) {
+	                            if (!--pending) done();
+	                            return;
+	                        }
+	                        results.push(pth.normalize(file) + (stat.isDirectory() ? self.sep : ""));
+	                        if (!stat.isDirectory()) {
+	                            if (!--pending) done();
+	                            return;
+	                        }
+	                        self.fs.realpath(file, function (err, realDir) {
+	                            if (err) return done(err);
+	                            if (visited.has(realDir)) {
+	                                if (!--pending) done();
+	                                return;
+	                            }
+	                            visited.add(realDir);
+	                            walk(file, visited, function (err) {
+	                                if (err) return done(err);
+	                                if (!--pending) done();
+	                            });
+	                        });
+	                    });
+	                });
+	            });
+	        });
+	    };
+
+	    self.fs.realpath(dir, function (err, realDir) {
+	        if (err) return finish(err);
+	        rootReal = realDir;
+	        walk(dir, new Set([realDir]), finish);
 	    });
 	};
 
@@ -33502,13 +34127,13 @@ function requireUtils () {
 	    return void 0;
 	};
 
-	// make abolute paths taking prefix as root folder
+	// make absolute paths taking prefix as root folder
 	Utils.sanitize = function (/*string*/ prefix, /*string*/ name) {
 	    prefix = pth.resolve(pth.normalize(prefix));
 	    var parts = name.split("/");
 	    for (var i = 0, l = parts.length; i < l; i++) {
 	        var path = pth.normalize(pth.join(prefix, parts.slice(i, l).join(pth.sep)));
-	        if (path.indexOf(prefix) === 0) {
+	        if (path === prefix || path.startsWith(prefix + pth.sep)) {
 	            return path;
 	        }
 	    }
@@ -33530,7 +34155,21 @@ function requireUtils () {
 	Utils.readBigUInt64LE = function (/*Buffer*/ buffer, /*int*/ index) {
 	    const lo = buffer.readUInt32LE(index);
 	    const hi = buffer.readUInt32LE(index + 4);
-	    return hi * 0x100000000 + lo;
+	    const value = hi * 0x100000000 + lo;
+	    // The result is a JS number, so values above 2^53 - 1 cannot be represented
+	    // exactly. These are zip64 sizes/offsets/counts used as buffer indices; a
+	    // silently rounded value would misparse the archive. Reject instead.
+	    if (value > Number.MAX_SAFE_INTEGER) {
+	        throw Errors.ZIP64_VALUE_TOO_LARGE();
+	    }
+	    return value;
+	};
+
+	Utils.writeBigUInt64LE = function (/*Buffer*/ buffer, /*Number*/ value, /*int*/ index) {
+	    const lo = value >>> 0;
+	    const hi = Math.floor(value / 0x100000000) >>> 0;
+	    buffer.writeUInt32LE(lo, index);
+	    buffer.writeUInt32LE(hi, index + 4);
 	};
 
 	Utils.fromDOS2Date = function (val) {
@@ -33760,6 +34399,7 @@ function requireEntryHeader () {
 	            switch (val) {
 	                case Constants.STORED:
 	                    this.version = 10;
+	                    break;
 	                case Constants.DEFLATED:
 	                default:
 	                    this.version = 20;
@@ -33857,7 +34497,12 @@ function requireEntryHeader () {
 
 	        // get Unix file permissions
 	        get fileAttr() {
-	            return (_attr || 0) >> 16 & 0xfff;
+	            // Mask to the 9 rwxrwxrwx bits only. The setuid (0o4000), setgid
+	            // (0o2000) and sticky (0o1000) bits are attacker-controlled archive
+	            // metadata; preserving them on extraction (keepOriginalPermission)
+	            // lets a crafted zip plant a setuid-root binary when extracting as
+	            // root, a local privilege escalation (GHSA-679w-jf3m-wh39).
+	            return ((_attr || 0) >> 16) & 0o777;
 	        },
 
 	        get offset() {
@@ -33884,6 +34529,13 @@ function requireEntryHeader () {
 	        },
 
 	        loadLocalHeaderFromBinary: function (/*Buffer*/ input) {
+	            // The LOC offset comes from the central directory and is attacker
+	            // controlled. Reject one that would read past the end of the buffer,
+	            // otherwise readUInt32LE below throws a raw RangeError instead of a
+	            // clean INVALID_LOC (and escapes the async error path).
+	            if (_offset < 0 || _offset + Constants.LOCHDR > input.length) {
+	                throw Utils.Errors.INVALID_LOC();
+	            }
 	            var data = input.slice(_offset, _offset + Constants.LOCHDR);
 	            // 30 bytes and should start with "PK\003\004"
 	            if (data.readUInt32LE(0) !== Constants.LOCSIG) {
@@ -33962,7 +34614,11 @@ function requireEntryHeader () {
 	            // version needed to extract
 	            data.writeUInt16LE(_version, Constants.LOCVER);
 	            // general purpose bit flag
-	            data.writeUInt16LE(_flags, Constants.LOCFLG);
+	            // clear bit 3 (data descriptor): we always write the real crc-32
+	            // and sizes into this local header, so no trailing descriptor is
+	            // emitted. Leaving the flag set would make the output unreadable
+	            // (see issue #555).
+	            data.writeUInt16LE(_flags & ~Constants.FLG_DESC, Constants.LOCFLG);
 	            // compression method
 	            data.writeUInt16LE(_method, Constants.LOCHOW);
 	            // modification time (2 bytes time, 2 bytes date)
@@ -33990,7 +34646,9 @@ function requireEntryHeader () {
 	            // version needed to extract
 	            data.writeUInt16LE(_version, Constants.CENVER);
 	            // encrypt, decrypt flags
-	            data.writeUInt16LE(_flags, Constants.CENFLG);
+	            // clear bit 3 (data descriptor) to match the local header we emit
+	            // (real crc/sizes are written, no descriptor follows the data) — issue #555
+	            data.writeUInt16LE(_flags & ~Constants.FLG_DESC, Constants.CENFLG);
 	            // compression method
 	            data.writeUInt16LE(_method, Constants.CENHOW);
 	            // modification time (2 bytes time, 2 bytes date)
@@ -34068,6 +34726,8 @@ function requireMainHeader () {
 	        _offset = 0,
 	        _commentLength = 0;
 
+	    const needsZip64 = () => _volumeEntries > Constants.EF_ZIP64_OR_16 || _totalEntries > Constants.EF_ZIP64_OR_16 || _size > Constants.EF_ZIP64_OR_32 || _offset > Constants.EF_ZIP64_OR_32;
+
 	    return {
 	        get diskEntries() {
 	            return _volumeEntries;
@@ -34105,7 +34765,7 @@ function requireMainHeader () {
 	        },
 
 	        get mainHeaderSize() {
-	            return Constants.ENDHDR + _commentLength;
+	            return (needsZip64() ? Constants.ZIP64HDR + Constants.END64HDR : 0) + Constants.ENDHDR + _commentLength;
 	        },
 
 	        loadFromBinary: function (/*Buffer*/ data) {
@@ -34135,7 +34795,7 @@ function requireMainHeader () {
 	                // total number of entries
 	                _totalEntries = Utils.readBigUInt64LE(data, Constants.ZIP64TOT);
 	                // central directory size in bytes
-	                _size = Utils.readBigUInt64LE(data, Constants.ZIP64SIZE);
+	                _size = Utils.readBigUInt64LE(data, Constants.ZIP64SIZB);
 	                // offset of first CEN header
 	                _offset = Utils.readBigUInt64LE(data, Constants.ZIP64OFF);
 
@@ -34144,22 +34804,67 @@ function requireMainHeader () {
 	        },
 
 	        toBinary: function () {
-	            var b = Buffer.alloc(Constants.ENDHDR + _commentLength);
+	            if (!needsZip64()) {
+	                var b = Buffer.alloc(Constants.ENDHDR + _commentLength);
+	                // "PK 05 06" signature
+	                b.writeUInt32LE(Constants.ENDSIG, 0);
+	                b.writeUInt32LE(0, 4);
+	                // number of entries on this volume
+	                b.writeUInt16LE(_volumeEntries, Constants.ENDSUB);
+	                // total number of entries
+	                b.writeUInt16LE(_totalEntries, Constants.ENDTOT);
+	                // central directory size in bytes
+	                b.writeUInt32LE(_size, Constants.ENDSIZ);
+	                // offset of first CEN header
+	                b.writeUInt32LE(_offset, Constants.ENDOFF);
+	                // zip file comment length
+	                b.writeUInt16LE(_commentLength, Constants.ENDCOM);
+	                // fill comment memory with spaces so no garbage is left there
+	                b.fill(" ", Constants.ENDHDR);
+
+	                return b;
+	            }
+
+	            var b = Buffer.alloc(this.mainHeaderSize);
+	            let offset = 0;
+
+	            // Zip64 end of central directory record.
+	            b.writeUInt32LE(Constants.ZIP64SIG, offset);
+	            Utils.writeBigUInt64LE(b, Constants.ZIP64HDR - Constants.ZIP64LEAD, offset + Constants.ZIP64SIZE);
+	            b.writeUInt16LE(45, offset + Constants.ZIP64VEM);
+	            b.writeUInt16LE(45, offset + Constants.ZIP64VER);
+	            b.writeUInt32LE(0, offset + Constants.ZIP64DSK);
+	            b.writeUInt32LE(0, offset + Constants.ZIP64DSKDIR);
+	            Utils.writeBigUInt64LE(b, _volumeEntries, offset + Constants.ZIP64SUB);
+	            Utils.writeBigUInt64LE(b, _totalEntries, offset + Constants.ZIP64TOT);
+	            Utils.writeBigUInt64LE(b, _size, offset + Constants.ZIP64SIZB);
+	            Utils.writeBigUInt64LE(b, _offset, offset + Constants.ZIP64OFF);
+
+	            const zip64EndOffset = _offset + _size;
+	            offset += Constants.ZIP64HDR;
+
+	            // Zip64 end of central directory locator.
+	            b.writeUInt32LE(Constants.END64SIG, offset);
+	            b.writeUInt32LE(0, offset + Constants.END64START);
+	            Utils.writeBigUInt64LE(b, zip64EndOffset, offset + Constants.END64OFF);
+	            b.writeUInt32LE(1, offset + Constants.END64NUMDISKS);
+	            offset += Constants.END64HDR;
+
 	            // "PK 05 06" signature
-	            b.writeUInt32LE(Constants.ENDSIG, 0);
-	            b.writeUInt32LE(0, 4);
+	            b.writeUInt32LE(Constants.ENDSIG, offset);
+	            b.writeUInt32LE(0, offset + 4);
 	            // number of entries on this volume
-	            b.writeUInt16LE(_volumeEntries, Constants.ENDSUB);
+	            b.writeUInt16LE(Math.min(_volumeEntries, Constants.EF_ZIP64_OR_16), offset + Constants.ENDSUB);
 	            // total number of entries
-	            b.writeUInt16LE(_totalEntries, Constants.ENDTOT);
+	            b.writeUInt16LE(Math.min(_totalEntries, Constants.EF_ZIP64_OR_16), offset + Constants.ENDTOT);
 	            // central directory size in bytes
-	            b.writeUInt32LE(_size, Constants.ENDSIZ);
+	            b.writeUInt32LE(Math.min(_size, Constants.EF_ZIP64_OR_32), offset + Constants.ENDSIZ);
 	            // offset of first CEN header
-	            b.writeUInt32LE(_offset, Constants.ENDOFF);
+	            b.writeUInt32LE(Math.min(_offset, Constants.EF_ZIP64_OR_32), offset + Constants.ENDOFF);
 	            // zip file comment length
-	            b.writeUInt16LE(_commentLength, Constants.ENDCOM);
+	            b.writeUInt16LE(_commentLength, offset + Constants.ENDCOM);
 	            // fill comment memory with spaces so no garbage is left there
-	            b.fill(" ", Constants.ENDHDR);
+	            b.fill(" ", offset + Constants.ENDHDR);
 
 	            return b;
 	        },
@@ -34250,11 +34955,18 @@ var hasRequiredInflater;
 function requireInflater () {
 	if (hasRequiredInflater) return inflater;
 	hasRequiredInflater = 1;
-	const version = +(process.versions ? process.versions.node : "").split(".")[0] || 0;
+	const version = +(process?.versions?.node ?? "").split(".")[0] || 0;
+	const Errors = requireErrors();
 
 	inflater = function (/*Buffer*/ inbuf, /*number*/ expectedLength) {
 	    var zlib = require$$0$6;
-	    const option = version >= 15 && expectedLength > 0 ? { maxOutputLength: expectedLength } : {};
+	    // Cap decompression output at the entry's declared uncompressed size to bound
+	    // decompression bombs (CVE-2026-39244). A declared size of 0 must not disable
+	    // the cap: a genuinely empty entry inflates to 0 bytes, so a 1-byte floor
+	    // still lets it through while stopping a bomb that lies about its size
+	    // (GHSA-rcw4-f5rp-g42v). zlib requires maxOutputLength >= 1.
+	    const maxOutputLength = expectedLength > 0 ? expectedLength : 1;
+	    const option = version >= 15 ? { maxOutputLength } : {};
 
 	    return {
 	        inflate: function () {
@@ -34264,12 +34976,35 @@ function requireInflater () {
 	        inflateAsync: function (/*Function*/ callback) {
 	            var tmp = zlib.createInflateRaw(option),
 	                parts = [],
-	                total = 0;
+	                total = 0,
+	                done = false;
+	            const fail = function (err) {
+	                if (done) return;
+	                done = true;
+	                tmp.destroy();
+	                callback && callback(Buffer.alloc(0), err);
+	            };
+	            // Route stream errors (e.g. Z_DATA_ERROR on malformed input) through the
+	            // callback. Without an "error" listener zlib re-throws the event as an
+	            // uncaught exception on a later tick, crashing the host process instead
+	            // of failing the call (GHSA-8238-w5pm-2374).
+	            tmp.on("error", function (err) {
+	                fail(err);
+	            });
 	            tmp.on("data", function (data) {
-	                parts.push(data);
+	                if (done) return;
 	                total += data.length;
+	                // The streaming API ignores maxOutputLength, so enforce the cap by
+	                // hand; otherwise the async path decompresses without limit while the
+	                // sync path is capped (GHSA-v429-h5qx-84wm, GHSA-c6fg-446q-cg94).
+	                if (total > maxOutputLength) {
+	                    return fail(Errors.MAX_OUTPUT_EXCEEDED());
+	                }
+	                parts.push(data);
 	            });
 	            tmp.on("end", function () {
+	                if (done) return;
+	                done = true;
 	                var buf = Buffer.alloc(total),
 	                    written = 0;
 	                buf.fill(0);
@@ -34514,52 +35249,36 @@ function requireZipEntry () {
 	            return Buffer.alloc(0);
 	        }
 	        _extralocal = _centralHeader.loadLocalHeaderFromBinary(input);
-	        return input.slice(_centralHeader.realDataOffset, _centralHeader.realDataOffset + _centralHeader.compressedSize);
+	        const dataOffset = _centralHeader.realDataOffset;
+	        const dataEnd = dataOffset + _centralHeader.compressedSize;
+	        // The offsets and sizes come from attacker-controlled headers. Require the
+	        // declared compressed extent to be fully present rather than letting slice()
+	        // silently clamp to a short buffer (which only surfaces later as a CRC
+	        // failure). Fail loudly with a header error instead (GHSA-wwrv-q5gf-5843).
+	        if (dataOffset < 0 || dataEnd < dataOffset || dataEnd > input.length) {
+	            throw Utils.Errors.INVALID_LOC();
+	        }
+	        return input.slice(dataOffset, dataEnd);
 	    }
 
 	    function crc32OK(data) {
-	        // if bit 3 (0x08) of the general-purpose flags field is set, then the CRC-32 and file sizes are not known when the local header is written
-	        if (!_centralHeader.flags_desc && !_centralHeader.localHeader.flags_desc) {
-	            if (Utils.crc32(data) !== _centralHeader.localHeader.crc) {
-	                return false;
-	            }
-	        } else {
-	            const descriptor = {};
-	            const dataEndOffset = _centralHeader.realDataOffset + _centralHeader.compressedSize;
-	            // no descriptor after compressed data, instead new local header
-	            if (input.readUInt32LE(dataEndOffset) == Constants.LOCSIG || input.readUInt32LE(dataEndOffset) == Constants.CENSIG) {
-	                throw Utils.Errors.DESCRIPTOR_NOT_EXIST();
-	            }
+	        // When bit 3 (0x08) of the general-purpose flags is set, the crc-32 and
+	        // sizes were unknown when the local file header was written, so that
+	        // header carries placeholder zeros and the real values are repeated in a
+	        // data descriptor after the compressed data. adm-zip always parses the
+	        // central directory, whose header holds the authoritative crc-32 and
+	        // sizes, so we validate the payload against that value.
+	        //
+	        // Earlier versions instead located and parsed the trailing descriptor and
+	        // threw when it was absent or in an unexpected shape. Many valid archives
+	        // set the descriptor flag but write the real crc/sizes into the local and
+	        // central headers without emitting a descriptor (or write one we did not
+	        // recognise), so that strict handling rejected readable zips
+	        // (issues #533, #548, #554). Trusting the central-directory crc keeps the
+	        // integrity check while accepting those archives.
+	        const expectedCrc = _centralHeader.flags_desc || _centralHeader.localHeader.flags_desc ? _centralHeader.crc : _centralHeader.localHeader.crc;
 
-	            // get decriptor data
-	            if (input.readUInt32LE(dataEndOffset) == Constants.EXTSIG) {
-	                // descriptor with signature
-	                descriptor.crc = input.readUInt32LE(dataEndOffset + Constants.EXTCRC);
-	                descriptor.compressedSize = input.readUInt32LE(dataEndOffset + Constants.EXTSIZ);
-	                descriptor.size = input.readUInt32LE(dataEndOffset + Constants.EXTLEN);
-	            } else if (input.readUInt16LE(dataEndOffset + 12) === 0x4b50) {
-	                // descriptor without signature (we check is new header starting where we expect)
-	                descriptor.crc = input.readUInt32LE(dataEndOffset + Constants.EXTCRC - 4);
-	                descriptor.compressedSize = input.readUInt32LE(dataEndOffset + Constants.EXTSIZ - 4);
-	                descriptor.size = input.readUInt32LE(dataEndOffset + Constants.EXTLEN - 4);
-	            } else {
-	                throw Utils.Errors.DESCRIPTOR_UNKNOWN();
-	            }
-
-	            // check data integrity
-	            if (descriptor.compressedSize !== _centralHeader.compressedSize || descriptor.size !== _centralHeader.size || descriptor.crc !== _centralHeader.crc) {
-	                throw Utils.Errors.DESCRIPTOR_FAULTY();
-	            }
-	            if (Utils.crc32(data) !== descriptor.crc) {
-	                return false;
-	            }
-
-	            // @TODO: zip64 bit descriptor fields
-	            // if bit 3 is set and any value in local header "zip64 Extended information" extra field are set 0 (place holder)
-	            // then 64-bit descriptor format is used instead of 32-bit
-	            // central header - "zip64 Extended information" extra field should store real values and not place holders
-	        }
-	        return true;
+	        return Utils.crc32(data) === expectedCrc;
 	    }
 
 	    function decompress(/*Boolean*/ async, /*Function*/ callback, /*String, Buffer*/ pass) {
@@ -34574,25 +35293,44 @@ function requireZipEntry () {
 	            return Buffer.alloc(0);
 	        }
 
-	        var compressedData = getCompressedDataFromZip();
+	        var compressedData;
+	        try {
+	            compressedData = getCompressedDataFromZip();
 
-	        if (compressedData.length === 0) {
-	            // File is empty, nothing to decompress.
-	            if (async && callback) callback(compressedData);
-	            return compressedData;
-	        }
-
-	        if (_centralHeader.encrypted) {
-	            if ("string" !== typeof pass && !Buffer.isBuffer(pass)) {
-	                throw Utils.Errors.INVALID_PASS_PARAM();
+	            if (compressedData.length === 0) {
+	                // File is empty, nothing to decompress.
+	                if (async && callback) callback(compressedData);
+	                return compressedData;
 	            }
-	            compressedData = Methods.ZipCrypto.decrypt(compressedData, _centralHeader, pass);
+
+	            if (_centralHeader.encrypted) {
+	                if ("string" !== typeof pass && !Buffer.isBuffer(pass)) {
+	                    throw Utils.Errors.INVALID_PASS_PARAM();
+	                }
+	                compressedData = Methods.ZipCrypto.decrypt(compressedData, _centralHeader, pass);
+	            }
+	        } catch (err) {
+	            // These synchronous parse/setup steps run before any callback fires.
+	            // In async mode a malformed local header (e.g. a bad LOC offset) would
+	            // otherwise throw out of getDataAsync and bypass the callback error
+	            // channel, crashing the caller. Route it through the callback instead.
+	            if (async && callback) {
+	                callback(Buffer.alloc(0), err);
+	                return Buffer.alloc(0);
+	            }
+	            throw err;
 	        }
 
-	        var data = Buffer.alloc(_centralHeader.size);
+	        var data;
 
 	        switch (_centralHeader.method) {
 	            case Utils.Constants.STORED:
+	                // STORED entries are not compressed, so the uncompressed output is
+	                // exactly the bytes present in the archive. Allocate from the real
+	                // data length rather than the attacker-declared central-directory
+	                // size, otherwise a tiny archive can declare a huge size and force a
+	                // multi-gigabyte allocation before any validation (CVE-2026-39244).
+	                data = Buffer.alloc(compressedData.length);
 	                compressedData.copy(data);
 	                if (!crc32OK(data)) {
 	                    if (async && callback) callback(data, Utils.Errors.BAD_CRC()); //si added error
@@ -34603,23 +35341,28 @@ function requireZipEntry () {
 	                    return data;
 	                }
 	            case Utils.Constants.DEFLATED:
+	                // Do not pre-allocate the declared uncompressed size. The inflater
+	                // grows its output buffer as zlib emits data and caps the total at
+	                // the declared size (maxOutputLength), so a bogus size can no longer
+	                // trigger an eager allocation before the data is read (CVE-2026-39244).
 	                var inflater = new Methods.Inflater(compressedData, _centralHeader.size);
 	                if (!async) {
-	                    const result = inflater.inflate(data);
-	                    result.copy(data, 0);
+	                    data = inflater.inflate();
 	                    if (!crc32OK(data)) {
 	                        throw Utils.Errors.BAD_CRC(`"${decoder.decode(_entryName)}"`);
 	                    }
 	                    return data;
 	                } else {
-	                    inflater.inflateAsync(function (result) {
-	                        result.copy(result, 0);
-	                        if (callback) {
-	                            if (!crc32OK(result)) {
-	                                callback(result, Utils.Errors.BAD_CRC()); //si added error
-	                            } else {
-	                                callback(result);
-	                            }
+	                    inflater.inflateAsync(function (result, err) {
+	                        if (!callback) return;
+	                        if (err) {
+	                            // surface inflater/stream failures instead of validating
+	                            // the empty placeholder buffer against the CRC
+	                            callback(Buffer.alloc(0), err);
+	                        } else if (!crc32OK(result)) {
+	                            callback(result, Utils.Errors.BAD_CRC()); //si added error
+	                        } else {
+	                            callback(result);
 	                        }
 	                    });
 	                }
@@ -34769,10 +35512,12 @@ function requireZipEntry () {
 	        },
 
 	        get name() {
-	            var n = decoder.decode(_entryName);
+	            const n = decoder.decode(_entryName);
+	            // For directories the name is the last path segment; drop the trailing
+	            // separator first so "a/b/c/" yields "c" and not "" (issue #466).
 	            return _isDirectory
 	                ? n
-	                      .substr(n.length - 1)
+	                      .replace(/[/\\]$/, "")
 	                      .split("/")
 	                      .pop()
 	                : n.split("/").pop();
@@ -34907,7 +35652,10 @@ function requireZipFile () {
 
 	zipFile = function (/*Buffer|null*/ inBuffer, /** object */ options) {
 	    var entryList = [],
-	        entryTable = {},
+	        // prototype-less: entry names come from untrusted input, so keys like
+	        // "__proto__" or "constructor" must be plain data, not touch the prototype
+	        // chain (which otherwise crashes addFile and hides such entries)
+	        entryTable = Object.create(null),
 	        _comment = Buffer.alloc(0),
 	        mainHeader = new Headers.MainHeader(),
 	        loadedEntries = false;
@@ -34956,7 +35704,7 @@ function requireZipFile () {
 
 	    function readEntries() {
 	        loadedEntries = true;
-	        entryTable = {};
+	        entryTable = Object.create(null);
 	        if (mainHeader.diskEntries > (inBuffer.length - mainHeader.offset) / Utils.Constants.CENHDR) {
 	            throw Utils.Errors.DISK_ENTRY_TOO_LARGE();
 	        }
@@ -34976,6 +35724,16 @@ function requireZipFile () {
 	            if (entry.header.commentLength) entry.comment = inBuffer.slice(tmp, tmp + entry.header.commentLength);
 
 	            index += entry.header.centralHeaderSize;
+
+	            // Reject archives that declare the same entry name twice. adm-zip keeps
+	            // every entry in entryList but only the last in entryTable, so getEntry()
+	            // (table) and extractAllTo() (list) could resolve one name to different
+	            // content: an app that validates entry bytes via getEntry() before
+	            // extracting could approve one file while a different one lands on disk
+	            // (GHSA-p634-w6r4-rjp2). Fail closed on the ambiguity.
+	            if (entry.entryName in entryTable) {
+	                throw Utils.Errors.DUPLICATE_ENTRY(`"${entry.entryName}"`);
+	            }
 
 	            entryList[i] = entry;
 	            entryTable[entry.entryName] = entry;
@@ -35033,7 +35791,14 @@ function requireZipFile () {
 
 	    function sortEntries() {
 	        if (entryList.length > 1 && !noSort) {
-	            entryList.sort((a, b) => a.entryName.toLowerCase().localeCompare(b.entryName.toLowerCase()));
+	            // Decode + lowercase each name once rather than on every comparison:
+	            // the entryName getter re-decodes the underlying buffer on each access,
+	            // so the previous inline comparator did O(n log n) redundant decoding.
+	            // Ordering is unchanged (same localeCompare on the same keys).
+	            entryList = entryList
+	                .map((entry) => ({ entry, key: entry.entryName.toLowerCase() }))
+	                .sort((a, b) => a.key.localeCompare(b.key))
+	                .map((pair) => pair.entry);
 	        }
 	    }
 
@@ -35245,7 +36010,7 @@ function requireZipFile () {
 	            // write main header
 	            const mh = mainHeader.toBinary();
 	            if (_comment) {
-	                _comment.copy(mh, Utils.Constants.ENDHDR); // add zip file comment
+	                _comment.copy(mh, mh.length - _comment.length); // add zip file comment
 	            }
 	            mh.copy(outBuffer, dindex);
 
@@ -35323,7 +36088,7 @@ function requireZipFile () {
 
 	                        const mh = mainHeader.toBinary();
 	                        if (_comment) {
-	                            _comment.copy(mh, Utils.Constants.ENDHDR); // add zip file comment
+	                            _comment.copy(mh, mh.length - _comment.length); // add zip file comment
 	                        }
 
 	                        mh.copy(outBuffer, dindex); // write main header
@@ -35403,6 +36168,18 @@ function requireAdmZip () {
 
 	    // instanciate utils filesystem
 	    const filetools = new Utils(opts);
+
+	    // Restore the archived permissions on extracted directories. This has to run
+	    // after a directory's contents are written: applying a restrictive mode
+	    // (e.g. 0o500) up front would stop us writing the files it contains. Applying
+	    // the deepest paths first keeps parent directories traversable while their
+	    // children are updated (issue #530).
+	    const applyDirAttributes = (dirEntries) => {
+	        dirEntries
+	            .filter((d) => d.attr)
+	            .sort((a, b) => b.path.length - a.path.length)
+	            .forEach((d) => filetools.fs.chmodSync(d.path, d.attr));
+	    };
 
 	    if (typeof opts.decoder !== "object" || typeof opts.decoder.encode !== "function" || typeof opts.decoder.decode !== "function") {
 	        opts.decoder = Utils.decoder;
@@ -35558,6 +36335,7 @@ function requireAdmZip () {
 	         * Remove the entry from the file or the entry and all it's nested directories and files if the given entry is a directory
 	         *
 	         * @param {ZipEntry|string} entry
+	         * @param {boolean} withsubfolders
 	         * @returns {void}
 	         */
 	        deleteFile: function (entry, withsubfolders = true) {
@@ -35842,7 +36620,11 @@ function requireAdmZip () {
 	        addLocalFolderAsync2: function (options, callback) {
 	            const self = this;
 	            options = typeof options === "object" ? options : { localPath: options };
-	            localPath = pth.resolve(fixPath(options.localPath));
+	            // Resolve the local filesystem path with the platform resolver. Do NOT
+	            // run it through fixPath: that normalizes ZIP-internal paths to POSIX
+	            // and prepends "/", which turns a Windows path like C:\dir into
+	            // \C:\dir, so readdir finds nothing and the archive comes out empty.
+	            const localPath = pth.resolve(options.localPath);
 	            let { zipPath, filter, namefix } = options;
 
 	            if (filter instanceof RegExp) {
@@ -35861,7 +36643,7 @@ function requireAdmZip () {
 	            zipPath = zipPath ? fixPath(zipPath) : "";
 
 	            // Check Namefix function
-	            if (namefix == "latin1") {
+	            if (namefix === "latin1") {
 	                namefix = (str) =>
 	                    str
 	                        .normalize("NFD")
@@ -35877,14 +36659,21 @@ function requireAdmZip () {
 
 	            filetools.fs.open(localPath, "r", function (err) {
 	                if (err && err.code === "ENOENT") {
-	                    callback(undefined, Utils.Errors.FILE_NOT_FOUND(localPath));
+	                    // callback is (err, done); errors belong in the first argument,
+	                    // otherwise addLocalFolderPromise treats the error as "done" and
+	                    // resolves instead of rejecting.
+	                    callback(Utils.Errors.FILE_NOT_FOUND(localPath), false);
 	                } else if (err) {
-	                    callback(undefined, err);
+	                    callback(err, false);
 	                } else {
 	                    filetools.findFilesAsync(localPath, function (err, fileEntries) {
-	                        if (err) return callback(err);
+	                        if (err) return callback(err, false);
 	                        fileEntries = fileEntries.filter((dir) => filter(relPathFix(dir)));
-	                        if (!fileEntries.length) callback(undefined, false);
+	                        // Nothing to add (empty folder or everything filtered out) is a
+	                        // success, not an error. Report done and stop, otherwise the
+	                        // reduce below runs and the callback fires a second time -- and
+	                        // signalling done=false left addLocalFolderPromise hanging.
+	                        if (!fileEntries.length) return callback(undefined, true);
 
 	                        setImmediate(
 	                            fileEntries.reverse().reduce(function (next, entry) {
@@ -35919,7 +36708,7 @@ function requireAdmZip () {
 	        addLocalFolderPromise: function (localPath, props) {
 	            return new Promise((resolve, reject) => {
 	                this.addLocalFolderAsync2(Object.assign({ localPath }, props), (err, done) => {
-	                    if (err) reject(err);
+	                    if (err) return reject(err);
 	                    if (done) resolve(this);
 	                });
 	            });
@@ -36037,7 +36826,7 @@ function requireAdmZip () {
 
 	            var entryName = canonical(item.entryName);
 
-	            var target = sanitize(targetPath, outFileName && !item.isDirectory ? outFileName : maintainEntryPath ? entryName : pth.basename(entryName));
+	            var target = sanitize(targetPath, outFileName && !item.isDirectory ? canonical(outFileName) : maintainEntryPath ? entryName : pth.basename(entryName));
 
 	            if (item.isDirectory) {
 	                var children = _zip.getEntryChildren(item);
@@ -36047,8 +36836,14 @@ function requireAdmZip () {
 	                    if (!content) {
 	                        throw Utils.Errors.CANT_EXTRACT_FILE();
 	                    }
-	                    var name = canonical(child.entryName);
-	                    var childName = sanitize(targetPath, maintainEntryPath ? name : pth.basename(name));
+	                    // When not maintaining the full entry path, keep each child's path
+	                    // relative to the extracted directory (drop the directory's own
+	                    // prefix) instead of flattening every file to its basename, which
+	                    // collapsed subdirectories together (issue #306).
+	                    var name = canonical(maintainEntryPath ? child.entryName : child.entryName.substring(item.entryName.length));
+	                    var childName = sanitize(targetPath, name);
+	                    // reject writing through a pre-existing symlink inside the target
+	                    filetools.assertPathSafe(targetPath, childName);
 	                    // The reverse operation for attr depend on method addFile()
 	                    const fileAttr = keepOriginalPermission ? child.header.fileAttr : undefined;
 	                    filetools.writeFileTo(childName, content, overwrite, fileAttr);
@@ -36058,6 +36853,9 @@ function requireAdmZip () {
 
 	            var content = item.getData(_zip.password);
 	            if (!content) throw Utils.Errors.CANT_EXTRACT_FILE();
+
+	            // reject writing through a pre-existing symlink inside the target
+	            filetools.assertPathSafe(targetPath, target);
 
 	            if (filetools.fs.existsSync(target) && !overwrite) {
 	                throw Utils.Errors.CANT_OVERRIDE();
@@ -36078,12 +36876,14 @@ function requireAdmZip () {
 	                return false;
 	            }
 
-	            for (var entry in _zip.entries) {
+	            for (var entry of _zip.entries) {
 	                try {
 	                    if (entry.isDirectory) {
 	                        continue;
 	                    }
-	                    var content = _zip.entries[entry].getData(pass);
+	                    // was `_zip.entries[entry]` (indexing the array with an entry
+	                    // object -> undefined -> threw -> test() always returned false)
+	                    var content = entry.getData(pass);
 	                    if (!content) {
 	                        return false;
 	                    }
@@ -36110,10 +36910,15 @@ function requireAdmZip () {
 	            overwrite = get_Bool(false, overwrite);
 	            if (!_zip) throw Utils.Errors.NO_ZIP();
 
+	            const dirEntries = [];
 	            _zip.entries.forEach(function (entry) {
 	                var entryName = sanitize(targetPath, canonical(entry.entryName));
+	                // reject writing through a pre-existing symlink inside the target
+	                filetools.assertPathSafe(targetPath, entryName);
 	                if (entry.isDirectory) {
 	                    filetools.makeDir(entryName);
+	                    // defer restoring the directory permission until its files are written
+	                    if (keepOriginalPermission) dirEntries.push({ path: entryName, attr: entry.header.fileAttr });
 	                    return;
 	                }
 	                var content = entry.getData(pass);
@@ -36124,11 +36929,15 @@ function requireAdmZip () {
 	                const fileAttr = keepOriginalPermission ? entry.header.fileAttr : undefined;
 	                filetools.writeFileTo(entryName, content, overwrite, fileAttr);
 	                try {
+	                    // best-effort: an invalid date in the archive or a filesystem that
+	                    // rejects utimes must not fail extraction of already-written content (issue #379)
 	                    filetools.fs.utimesSync(entryName, entry.header.time, entry.header.time);
 	                } catch (err) {
-	                    throw Utils.Errors.CANT_EXTRACT_FILE();
+	                    /* ignore timestamp failures */
 	                }
 	            });
+
+	            applyDirAttributes(dirEntries);
 	        },
 
 	        /**
@@ -36179,19 +36988,42 @@ function requireAdmZip () {
 
 	            // Create directory entries first synchronously
 	            // this prevents race condition and assures folders are there before writing files
+	            const deferredDirAttr = [];
 	            for (const entry of dirEntries) {
 	                const dirPath = getPath(entry);
 	                // The reverse operation for attr depend on method addFile()
 	                const dirAttr = keepOriginalPermission ? entry.header.fileAttr : undefined;
 	                try {
+	                    // reject writing through a pre-existing symlink inside the target
+	                    filetools.assertPathSafe(targetPath, dirPath);
 	                    filetools.makeDir(dirPath);
-	                    if (dirAttr) filetools.fs.chmodSync(dirPath, dirAttr);
-	                    // in unix timestamp will change if files are later added to folder, but still
-	                    filetools.fs.utimesSync(dirPath, entry.header.time, entry.header.time);
 	                } catch (er) {
 	                    callback(getError("Unable to create folder", dirPath));
+	                    continue;
+	                }
+	                // defer restoring the directory permission until its files are written:
+	                // a restrictive mode applied now would block writing them
+	                if (dirAttr) deferredDirAttr.push({ path: dirPath, attr: dirAttr });
+	                try {
+	                    // in unix timestamp will change if files are later added to folder, but still.
+	                    // best-effort: a utimes failure must not abort extraction (issue #379)
+	                    filetools.fs.utimesSync(dirPath, entry.header.time, entry.header.time);
+	                } catch (er) {
+	                    /* ignore timestamp failures */
 	                }
 	            }
+
+	            // restore directory permissions once every file has been extracted
+	            const done = (err) => {
+	                if (!err) {
+	                    try {
+	                        applyDirAttributes(deferredDirAttr);
+	                    } catch (er) {
+	                        return callback(getError("Unable to set folder permissions", er.path || ""));
+	                    }
+	                }
+	                callback(err);
+	            };
 
 	            fileEntries.reverse().reduce(function (next, entry) {
 	                return function (err) {
@@ -36200,6 +37032,12 @@ function requireAdmZip () {
 	                    } else {
 	                        const entryName = pth.normalize(canonical(entry.entryName));
 	                        const filePath = sanitize(targetPath, entryName);
+	                        try {
+	                            // reject writing through a pre-existing symlink inside the target
+	                            filetools.assertPathSafe(targetPath, filePath);
+	                        } catch (er) {
+	                            return next(er);
+	                        }
 	                        entry.getDataAsync(function (content, err_1) {
 	                            if (err_1) {
 	                                next(err_1);
@@ -36210,21 +37048,19 @@ function requireAdmZip () {
 	                                const fileAttr = keepOriginalPermission ? entry.header.fileAttr : undefined;
 	                                filetools.writeFileToAsync(filePath, content, overwrite, fileAttr, function (succ) {
 	                                    if (!succ) {
-	                                        next(getError("Unable to write file", filePath));
+	                                        return next(getError("Unable to write file", filePath));
 	                                    }
-	                                    filetools.fs.utimes(filePath, entry.header.time, entry.header.time, function (err_2) {
-	                                        if (err_2) {
-	                                            next(getError("Unable to set times", filePath));
-	                                        } else {
-	                                            next();
-	                                        }
+	                                    filetools.fs.utimes(filePath, entry.header.time, entry.header.time, function () {
+	                                        // best-effort: a utimes failure must not abort extraction
+	                                        // of already-written content (issue #379)
+	                                        next();
 	                                    });
 	                                });
 	                            }
 	                        });
 	                    }
 	                };
-	            }, callback)();
+	            }, done)();
 	        },
 
 	        /**

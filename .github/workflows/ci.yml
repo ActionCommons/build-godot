@@ -29,7 +29,7 @@ jobs:
 
       - name: Setup Node.js
         id: setup-node
-        uses: actions/setup-node@v6
+        uses: actions/setup-node@v7
         with:
           node-version-file: .node-version
           cache: npm
@@ -70,7 +70,7 @@ jobs:
         uses: actions/checkout@v7
 
       - name: Setup Node.js
-        uses: actions/setup-node@v6
+        uses: actions/setup-node@v7
         with:
           node-version-file: .node-version
           cache: npm
@@ -98,16 +98,20 @@ jobs:
       fail-fast: false
       matrix:
         config:
+          # Linux build jobs are pinned to ubuntu-24.04: on the ubuntu-26.04 image
+          # (ubuntu-latest since late 2026) the Godot 4.5/4.6 link step fails with
+          # undefined references to embree::BVHN<4> in the raycast module.
+
           # 1. Standard Linux Editor Build (Baseline)
           - name: Linux Editor
-            runner: ubuntu-latest
+            runner: ubuntu-24.04
             platform: linuxbsd
             target: editor
             version: '4.5'
 
           # 2. Multi-Target Build (Verifies array parsing), Pre-release Flavor
           - name: Multi-Target (Linux) Pre-release
-            runner: ubuntu-latest
+            runner: ubuntu-24.04
             platform: linuxbsd
             target: 'template_debug, template_release'
             version: '4.6'
@@ -116,9 +120,14 @@ jobs:
           # 3. Godot 3.x build (verifies major-version detection, 4.x -> 3.x
           #    input translation and the pinned SCons install). Bounded by a
           #    timeout so CI only checks that the translated SCons invocation
-          #    configures and starts compiling.
+          #    configures and starts compiling. Unlike 4.x, the Godot 3.x x11
+          #    platform needs the X11/GL/audio development headers installed.
           - name: Godot 3.x Linux Editor
-            runner: ubuntu-latest
+            runner: ubuntu-24.04
+            apt_packages: >-
+              libx11-dev libxcursor-dev libxinerama-dev libxi-dev libxrandr-dev
+              libgl1-mesa-dev libglu1-mesa-dev libasound2-dev libpulse-dev
+              libudev-dev
             platform: linuxbsd
             target: editor
             version: '3.6'
@@ -181,6 +190,12 @@ jobs:
       - name: Checkout
         id: checkout
         uses: actions/checkout@v7
+
+      - name: Install System Dependencies
+        if: ${{ matrix.config.apt_packages }}
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends ${{ matrix.config.apt_packages }}
 
       - name: Run Godot Build Action
         id: build
