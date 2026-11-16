@@ -9,6 +9,7 @@
  */
 
 import { jest } from '@jest/globals'
+import * as path from 'node:path'
 import * as core from '../__fixtures__/core.js'
 import * as godot from '../__fixtures__/godot.js'
 
@@ -252,6 +253,50 @@ describe('main.ts – happy path', () => {
     await run()
 
     expect(core.warning).not.toHaveBeenCalled()
+  })
+
+  it.each(['3.5', '3.5.3'])(
+    'does not warn for %s, the oldest tested 3.x minor (boundary)',
+    async (version) => {
+      setInputs({ version })
+
+      await run()
+
+      expect(core.warning).not.toHaveBeenCalled()
+      expect(core.setFailed).not.toHaveBeenCalled()
+    }
+  )
+
+  it('marks version, platform and target as required inputs', async () => {
+    await run()
+
+    for (const name of ['version', 'platform', 'target']) {
+      expect(core.getInput).toHaveBeenCalledWith(name, { required: true })
+    }
+    for (const name of [
+      'flavor',
+      'directory',
+      'timeout',
+      'architecture',
+      'options'
+    ]) {
+      expect(core.getInput).toHaveBeenCalledWith(name)
+    }
+  })
+
+  it('resolves a relative directory input against the current working directory', async () => {
+    setInputs({ directory: './custom_godot_source' })
+    const expected = path.resolve('./custom_godot_source')
+
+    await run()
+
+    expect(core.setOutput).toHaveBeenCalledWith('directory', expected)
+    expect(godot.downloadAndExtract).toHaveBeenCalledWith(
+      '4.4',
+      'stable',
+      expected
+    )
+    expect(fsMkdtempSync).not.toHaveBeenCalled()
   })
 })
 
@@ -598,6 +643,20 @@ describe('main.ts – error propagation', () => {
     await run()
 
     expect(core.setFailed).toHaveBeenCalledWith('network error')
+  })
+
+  it('still exposes the directory output when the download fails', async () => {
+    // The working directory exists at that point, so later steps can inspect
+    // or clean it; the output is set before the download starts.
+    godot.downloadAndExtract.mockRejectedValue(new Error('network error'))
+
+    await run()
+
+    expect(core.setOutput).toHaveBeenCalledWith('directory', '/work')
+    expect(core.setOutput).not.toHaveBeenCalledWith(
+      'header_archive',
+      expect.anything()
+    )
   })
 
   it('calls setFailed when setupScons throws', async () => {

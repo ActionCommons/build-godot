@@ -53,9 +53,13 @@ jest.unstable_mockModule('child_process', () => ({ spawn: spawnMock }))
 // Tests configure the return value directly via mockReturnValue / mockImplementation.
 const fsReaddirSync = jest.fn()
 const fsStatSync = jest.fn()
+// realpathSync defaults to the identity so plain directory trees walk as
+// before; cycle tests override it to map a link onto a visited directory.
+const fsRealpathSync = jest.fn((p: unknown) => String(p))
 jest.unstable_mockModule('node:fs', () => ({
   readdirSync: fsReaddirSync,
   statSync: fsStatSync,
+  realpathSync: fsRealpathSync,
   existsSync: jest.fn<() => boolean>().mockReturnValue(true)
 }))
 
@@ -91,7 +95,9 @@ const {
   parseVersion,
   resolveArchArg,
   validateFlavor,
-  validateInputsForMajor
+  validateInputsForMajor,
+  HEADER_EXTENSIONS,
+  SIGTERM_GRACE_MS
 } = await import('../src/godot.js')
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
@@ -116,19 +122,42 @@ function makeFakeChild(
  */
 function makeDirent(
   name: string,
-  type: 'file' | 'dir'
-): { name: string; isDirectory: () => boolean; isFile: () => boolean } {
+  type: 'file' | 'dir' | 'symlink'
+): {
+  name: string
+  isDirectory: () => boolean
+  isFile: () => boolean
+  isSymbolicLink: () => boolean
+} {
+  // Like a real Dirent, a symlink reports neither directory nor file; the
+  // code must stat it to learn what it points at.
   return {
     name,
     isDirectory: () => type === 'dir',
-    isFile: () => type === 'file'
+    isFile: () => type === 'file',
+    isSymbolicLink: () => type === 'symlink'
   }
+}
+
+/** Returns a fake child that only exits when the test says so. */
+function makeChildWithPid(pid?: number): EventEmitter & {
+  kill: jest.Mock
+  pid?: number
+} {
+  const child = new EventEmitter() as EventEmitter & {
+    kill: jest.Mock
+    pid?: number
+  }
+  child.kill = jest.fn()
+  child.pid = pid
+  return child
 }
 
 // ── Global setup / teardown ───────────────────────────────────────────────────
 
 beforeEach(() => {
   osTmpdir.mockReturnValue('/tmp')
+  fsRealpathSync.mockImplementation((p: unknown) => String(p))
 })
 
 afterEach(() => {
@@ -1776,7 +1805,7 @@ describe('spawnWithTimeout edge cases', () => {
     expect(spawnMock).toHaveBeenCalledWith(
       'scons',
       ['platform=osx', 'tools=yes', 'target=release_debug', 'arch=arm64'],
-      { cwd: '/src/godot-3.6-stable', stdio: 'inherit' }
+      { cwd: '/src/godot-3.6-stable', stdio: 'inherit', detached: true }
     )
   })
 })
@@ -1911,6 +1940,474 @@ describe('createHeaderArchive', () => {
     expect(admZipInstance.addLocalFile).toHaveBeenCalledWith(
       '/src/deep/nested/types.h',
       'deep/nested'
+    )
+  })
+})
+
+// ── Regression: build failure while the timeout callback runs (BUG1) ─────────
+
+describe('spawnWithTimeout – exit during the timeout callback', () => {
+  afterEach(() => {
+    jest.useRealTimers()
+  })
+
+  /** onTimeout that only resolves when the test calls `finish()`. */
+  function makeSlowCallback(): {
+    onTimeout: jest.Mock<() => Promise<void>>
+    finish: () => void
+  } {
+    let finish: () => void = () => {}
+    const onTimeout = jest.fn<() => Promise<void>>(
+      () =>
+        new Promise<void>((resolve) => {
+          finish = resolve
+        })
+    )
+    return { onTimeout, finish: () => finish() }
+  }
+
+  it('reports a non-zero exit that arrives while headers are being archived', async () => {
+    jest.useFakeTimers()
+    const child = makeChildWithPid()
+    spawnMock.mockReturnValue(child)
+    const { onTimeout, finish } = makeSlowCallback()
+
+    const build = runBuild(
+      '/src',
+      ['linuxbsd'],
+      ['editor'],
+      'auto',
+      {},
+      1,
+      onTimeout
+    )
+    await jest.advanceTimersByTimeAsync(1500)
+    expect(onTimeout).toHaveBeenCalledTimes(1)
+    // The archive is still running: nothing has been killed yet.
+    expect(child.kill).not.toHaveBeenCalled()
+
+    // SCons fails on its own in the meantime.
+    child.emit('exit', 2, null)
+    finish()
+
+    await expect(build).rejects.toThrow(
+      'Build exited with code 2 (platform=linuxbsd target=editor)'
+    )
+    expect(child.kill).not.toHaveBeenCalled()
+  })
+
+  it('treats a clean exit during the archive as a completed build, not a timeout', async () => {
+    jest.useFakeTimers()
+    const child = makeChildWithPid()
+    spawnMock.mockReturnValue(child)
+    const { onTimeout, finish } = makeSlowCallback()
+
+    const build = runBuild(
+      '/src',
+      ['linuxbsd'],
+      ['editor'],
+      'auto',
+      {},
+      1,
+      onTimeout
+    )
+    await jest.advanceTimersByTimeAsync(1500)
+
+    child.emit('exit', 0, null)
+    finish()
+
+    await expect(build).resolves.toBeUndefined()
+    expect(child.kill).not.toHaveBeenCalled()
+    expect(coreWarning).not.toHaveBeenCalledWith(
+      'Build loop terminated due to timeout.'
+    )
+  })
+
+  it('waits for the archive to finish before settling', async () => {
+    jest.useFakeTimers()
+    const child = makeChildWithPid()
+    spawnMock.mockReturnValue(child)
+    const { onTimeout, finish } = makeSlowCallback()
+    let settled = false
+
+    const build = runBuild(
+      '/src',
+      ['linuxbsd'],
+      ['editor'],
+      'auto',
+      {},
+      1,
+      onTimeout
+    ).finally(() => {
+      settled = true
+    })
+    await jest.advanceTimersByTimeAsync(1500)
+    child.emit('exit', 2, null)
+    await jest.advanceTimersByTimeAsync(0)
+    expect(settled).toBe(false) // archive still in flight
+
+    finish()
+    await expect(build).rejects.toThrow('Build exited with code 2')
+    expect(settled).toBe(true)
+  })
+
+  it('still kills and treats the exit as a timeout once the archive has finished', async () => {
+    jest.useFakeTimers()
+    const child = makeChildWithPid()
+    spawnMock.mockReturnValue(child)
+    const { onTimeout, finish } = makeSlowCallback()
+
+    const build = runBuild(
+      '/src',
+      ['linuxbsd'],
+      ['editor'],
+      'auto',
+      {},
+      1,
+      onTimeout
+    )
+    await jest.advanceTimersByTimeAsync(1500)
+    finish()
+    await jest.advanceTimersByTimeAsync(0)
+    expect(child.kill).toHaveBeenCalledWith('SIGTERM')
+
+    child.emit('exit', 2, null) // SCons' own cleanup exit after SIGTERM
+    await expect(build).resolves.toBeUndefined()
+    expect(coreWarning).toHaveBeenCalledWith(
+      'Build loop terminated due to timeout.'
+    )
+  })
+})
+
+// ── Regression: SIGKILL escalation and process-group signalling (BUG2) ───────
+
+describe('spawnWithTimeout – termination', () => {
+  const realPlatform = Object.getOwnPropertyDescriptor(process, 'platform')!
+  let processKill: ReturnType<typeof jest.spyOn>
+
+  beforeEach(() => {
+    processKill = jest.spyOn(process, 'kill').mockImplementation(() => true)
+  })
+
+  afterEach(() => {
+    processKill.mockRestore()
+    Object.defineProperty(process, 'platform', realPlatform)
+    jest.useRealTimers()
+  })
+
+  it('exports a grace period of 10 seconds', () => {
+    expect(SIGTERM_GRACE_MS).toBe(10_000)
+  })
+
+  it('sends SIGKILL when the build ignores SIGTERM for the grace period', async () => {
+    jest.useFakeTimers()
+    const child = makeChildWithPid()
+    spawnMock.mockReturnValue(child)
+
+    const build = runBuild('/src', ['linuxbsd'], ['editor'], 'auto', {}, 1)
+    await jest.advanceTimersByTimeAsync(1000)
+    expect(child.kill).toHaveBeenCalledWith('SIGTERM')
+    expect(child.kill).not.toHaveBeenCalledWith('SIGKILL')
+
+    await jest.advanceTimersByTimeAsync(SIGTERM_GRACE_MS - 1)
+    expect(child.kill).not.toHaveBeenCalledWith('SIGKILL')
+    await jest.advanceTimersByTimeAsync(1)
+    expect(child.kill).toHaveBeenLastCalledWith('SIGKILL')
+    expect(coreWarning).toHaveBeenCalledWith(
+      `Build did not exit ${SIGTERM_GRACE_MS} ms after SIGTERM; sending SIGKILL.`
+    )
+
+    // A SIGKILL exit after a configured timeout is still a timeout, not a failure.
+    child.emit('exit', null, 'SIGKILL')
+    await expect(build).resolves.toBeUndefined()
+  })
+
+  it('does not send SIGKILL when the build exits within the grace period', async () => {
+    jest.useFakeTimers()
+    const child = makeChildWithPid()
+    spawnMock.mockReturnValue(child)
+
+    const build = runBuild('/src', ['linuxbsd'], ['editor'], 'auto', {}, 1)
+    await jest.advanceTimersByTimeAsync(1000)
+    child.emit('exit', null, 'SIGTERM')
+    await expect(build).resolves.toBeUndefined()
+
+    await jest.advanceTimersByTimeAsync(SIGTERM_GRACE_MS * 2)
+    expect(child.kill).toHaveBeenCalledTimes(1)
+    expect(child.kill).not.toHaveBeenCalledWith('SIGKILL')
+    expect(jest.getTimerCount()).toBe(0)
+  })
+
+  it('clears the SIGKILL timer when the child errors after SIGTERM', async () => {
+    jest.useFakeTimers()
+    const child = makeChildWithPid()
+    spawnMock.mockReturnValue(child)
+
+    const build = runBuild('/src', ['linuxbsd'], ['editor'], 'auto', {}, 1)
+    await jest.advanceTimersByTimeAsync(1000)
+    child.emit('error', new Error('kill failed'))
+    await expect(build).rejects.toThrow('kill failed')
+    expect(jest.getTimerCount()).toBe(0)
+  })
+
+  it('signals the whole process group on POSIX so compiler children stop too', async () => {
+    jest.useFakeTimers()
+    Object.defineProperty(process, 'platform', { value: 'linux' })
+    const child = makeChildWithPid(4242)
+    spawnMock.mockReturnValue(child)
+
+    const build = runBuild('/src', ['linuxbsd'], ['editor'], 'auto', {}, 1)
+    await jest.advanceTimersByTimeAsync(1000)
+
+    expect(spawnMock).toHaveBeenCalledWith('scons', expect.any(Array), {
+      cwd: '/src',
+      stdio: 'inherit',
+      detached: true
+    })
+    expect(processKill).toHaveBeenCalledWith(-4242, 'SIGTERM')
+    expect(child.kill).not.toHaveBeenCalled()
+
+    child.emit('exit', null, 'SIGTERM')
+    await expect(build).resolves.toBeUndefined()
+  })
+
+  it('falls back to child.kill when the process group is already gone', async () => {
+    jest.useFakeTimers()
+    Object.defineProperty(process, 'platform', { value: 'linux' })
+    processKill.mockImplementation(() => {
+      throw Object.assign(new Error('ESRCH'), { code: 'ESRCH' })
+    })
+    const child = makeChildWithPid(4242)
+    spawnMock.mockReturnValue(child)
+
+    const build = runBuild('/src', ['linuxbsd'], ['editor'], 'auto', {}, 1)
+    await jest.advanceTimersByTimeAsync(1000)
+
+    expect(processKill).toHaveBeenCalledWith(-4242, 'SIGTERM')
+    expect(child.kill).toHaveBeenCalledWith('SIGTERM')
+
+    child.emit('exit', null, 'SIGTERM')
+    await expect(build).resolves.toBeUndefined()
+  })
+
+  it('uses a plain kill and no process group on Windows', async () => {
+    jest.useFakeTimers()
+    Object.defineProperty(process, 'platform', { value: 'win32' })
+    const child = makeChildWithPid(4242)
+    spawnMock.mockReturnValue(child)
+
+    const build = runBuild('/src', ['windows'], ['editor'], 'auto', {}, 1)
+    await jest.advanceTimersByTimeAsync(1000)
+
+    expect(spawnMock).toHaveBeenCalledWith('scons', expect.any(Array), {
+      cwd: '/src',
+      stdio: 'inherit',
+      detached: false
+    })
+    expect(processKill).not.toHaveBeenCalled()
+    expect(child.kill).toHaveBeenCalledWith('SIGTERM')
+
+    child.emit('exit', null, 'SIGTERM')
+    await expect(build).resolves.toBeUndefined()
+  })
+})
+
+// ── Regression: stray entries in the working directory (BUG3) ────────────────
+
+describe('downloadAndExtract – stray entries in the working directory', () => {
+  beforeEach(() => {
+    tcDownloadTool.mockResolvedValue('/tmp/godot.tar.xz')
+    tcExtractTar.mockResolvedValue('/work')
+  })
+
+  it('ignores a dangling symlink that is not a godot-* entry', async () => {
+    fsReaddirSync.mockReturnValue(['stale-link', 'godot-4.4-stable', 'README'])
+    fsStatSync.mockImplementation((p: unknown) => {
+      if (String(p).endsWith('stale-link')) {
+        throw Object.assign(new Error('ENOENT'), { code: 'ENOENT' })
+      }
+      return { isDirectory: () => !String(p).endsWith('README') }
+    })
+
+    await expect(downloadAndExtract('4.4', 'stable', '/work')).resolves.toBe(
+      '/work/godot-4.4-stable'
+    )
+    // Only godot-* entries are stat'ed at all.
+    expect(fsStatSync).toHaveBeenCalledTimes(1)
+    expect(fsStatSync).toHaveBeenCalledWith('/work/godot-4.4-stable')
+  })
+
+  it('treats a dangling godot-* symlink as "not a directory"', async () => {
+    fsReaddirSync.mockReturnValue(['godot-3.6-stable', 'godot-4.4-stable'])
+    fsStatSync.mockImplementation((p: unknown) => {
+      if (String(p).endsWith('godot-3.6-stable')) {
+        throw Object.assign(new Error('ENOENT'), { code: 'ENOENT' })
+      }
+      return { isDirectory: () => true }
+    })
+
+    // The dangling link is not a candidate, so there is exactly one match.
+    await expect(downloadAndExtract('4.5', 'stable', '/work')).resolves.toBe(
+      '/work/godot-4.4-stable'
+    )
+  })
+})
+
+// ── Regression: exit-code message names the 3.x target (BUG4) ────────────────
+
+describe('spawnWithTimeout – exit-code message for Godot 3.x', () => {
+  it('names platform, tools and target for a 3.x build', async () => {
+    spawnMock.mockImplementation(() => makeFakeChild(255))
+
+    await expect(
+      runBuild(
+        '/src',
+        ['linuxbsd'],
+        ['editor'],
+        'x86_64',
+        { optimize: 'size' },
+        0,
+        undefined,
+        3
+      )
+    ).rejects.toThrow(
+      new Error(
+        'Build exited with code 255 (platform=x11 tools=yes target=release_debug)'
+      )
+    )
+  })
+
+  it('distinguishes two 3.x targets that share platform and tools', async () => {
+    spawnMock.mockImplementation(() => makeFakeChild(1))
+    const messages: string[] = []
+    for (const target of ['template_debug', 'template_release']) {
+      await runBuild(
+        '/src',
+        ['macos'],
+        [target],
+        'auto',
+        {},
+        0,
+        undefined,
+        3
+      ).catch((e: Error) => messages.push(e.message))
+    }
+    expect(messages).toEqual([
+      'Build exited with code 1 (platform=osx tools=no target=release_debug)',
+      'Build exited with code 1 (platform=osx tools=no target=release)'
+    ])
+  })
+})
+
+// ── Regression: symlinks in the header walk (BUG5) ───────────────────────────
+
+describe('createHeaderArchive – symbolic links', () => {
+  it('exposes the collected header extensions', () => {
+    expect(HEADER_EXTENSIONS).toEqual([
+      '.glsl',
+      '.h',
+      '.hh',
+      '.hpp',
+      '.inc',
+      '.inl'
+    ])
+  })
+
+  it('follows a symlinked header file and archives it under the link name', async () => {
+    fsReaddirSync.mockImplementation((dir: unknown) =>
+      dir === '/src' ? [makeDirent('link.h', 'symlink')] : []
+    )
+    fsStatSync.mockReturnValue({
+      isDirectory: () => false,
+      isFile: () => true
+    })
+
+    await createHeaderArchive('/src')
+
+    expect(fsStatSync).toHaveBeenCalledWith('/src/link.h')
+    expect(admZipInstance.addLocalFile).toHaveBeenCalledWith('/src/link.h', '')
+  })
+
+  it('walks a symlinked directory', async () => {
+    fsReaddirSync.mockImplementation((dir: unknown) => {
+      if (dir === '/src') return [makeDirent('linked_dir', 'symlink')]
+      if (dir === '/src/linked_dir') return [makeDirent('b.h', 'file')]
+      return []
+    })
+    fsStatSync.mockReturnValue({
+      isDirectory: () => true,
+      isFile: () => false
+    })
+    fsRealpathSync.mockImplementation((p: unknown) =>
+      p === '/src/linked_dir' ? '/elsewhere/real_dir' : String(p)
+    )
+
+    await createHeaderArchive('/src')
+
+    expect(admZipInstance.addLocalFile).toHaveBeenCalledWith(
+      '/src/linked_dir/b.h',
+      'linked_dir'
+    )
+  })
+
+  it('skips a dangling symlink instead of failing', async () => {
+    fsReaddirSync.mockImplementation((dir: unknown) =>
+      dir === '/src'
+        ? [makeDirent('dangling.h', 'symlink'), makeDirent('a.h', 'file')]
+        : []
+    )
+    fsStatSync.mockImplementation(() => {
+      throw Object.assign(new Error('ENOENT'), { code: 'ENOENT' })
+    })
+
+    await createHeaderArchive('/src')
+
+    expect(admZipInstance.addLocalFile.mock.calls.map((c) => c[0])).toEqual([
+      '/src/a.h'
+    ])
+  })
+
+  it('ignores a symlink to something that is neither a file nor a directory', async () => {
+    fsReaddirSync.mockImplementation((dir: unknown) =>
+      dir === '/src' ? [makeDirent('socket.h', 'symlink')] : []
+    )
+    fsStatSync.mockReturnValue({
+      isDirectory: () => false,
+      isFile: () => false
+    })
+
+    await createHeaderArchive('/src')
+
+    expect(admZipInstance.addLocalFile).not.toHaveBeenCalled()
+  })
+
+  it('visits each real directory once so link cycles terminate', async () => {
+    // /src/core/loop -> /src (a cycle); /src/core/a.h must be archived once.
+    fsReaddirSync.mockImplementation((dir: unknown) => {
+      if (dir === '/src') return [makeDirent('core', 'dir')]
+      if (dir === '/src/core') {
+        return [makeDirent('a.h', 'file'), makeDirent('loop', 'symlink')]
+      }
+      return []
+    })
+    fsStatSync.mockReturnValue({
+      isDirectory: () => true,
+      isFile: () => false
+    })
+    fsRealpathSync.mockImplementation((p: unknown) =>
+      p === '/src/core/loop' ? '/src' : String(p)
+    )
+
+    await createHeaderArchive('/src')
+
+    expect(fsReaddirSync).toHaveBeenCalledTimes(2)
+    expect(fsReaddirSync).not.toHaveBeenCalledWith('/src/core/loop', {
+      withFileTypes: true
+    })
+    expect(admZipInstance.addLocalFile).toHaveBeenCalledTimes(1)
+    expect(admZipInstance.addLocalFile).toHaveBeenCalledWith(
+      '/src/core/a.h',
+      'core'
     )
   })
 })

@@ -11,7 +11,7 @@ import * as core from '@actions/core'
 import * as exec from '@actions/exec'
 import * as tc from '@actions/tool-cache'
 import AdmZip from 'adm-zip'
-import { spawn } from 'child_process'
+import { spawn, type ChildProcess } from 'child_process'
 import * as fs from 'node:fs'
 import * as os from 'node:os'
 import * as path from 'node:path'
@@ -146,6 +146,12 @@ export const OPTION_PLATFORMS: Readonly<
  * silently fires after 1 ms for delays above 2^31 - 1 milliseconds.
  */
 export const MAX_TIMEOUT_SECONDS = Math.floor(2147483647 / 1000)
+
+/**
+ * Grace period (ms) between SIGTERM and SIGKILL when a timed-out build does
+ * not exit on its own. SCons normally exits within a second of SIGTERM.
+ */
+export const SIGTERM_GRACE_MS = 10_000
 
 /** Release flavors published on godotengine/godot-builds. */
 export const FLAVOR_PATTERN = /^(stable|(dev|alpha|beta|rc)[1-9]\d*)$/
@@ -531,12 +537,15 @@ export async function downloadAndExtract(
   // a reused working directory may already contain other godot-* trees (e.g.
   // a cached 3.x checkout next to a 4.x one) and picking the first match
   // would silently build the wrong version.
+  // Only godot-* entries are stat'ed: a user-supplied working directory (for
+  // example a repository checkout) may contain unrelated entries, and a
+  // dangling symlink among them must not abort the build. A dangling godot-*
+  // symlink is simply not a directory.
   const expected = `godot-${version}-${flavor}`
   const entries = fs.readdirSync(directory)
-  const candidates = entries.filter((e) => {
-    const fullPath = path.join(directory, e)
-    return fs.statSync(fullPath).isDirectory() && e.startsWith('godot-')
-  })
+  const candidates = entries.filter(
+    (e) => e.startsWith('godot-') && isDirectory(path.join(directory, e))
+  )
 
   let extractedEntry: string
   if (candidates.includes(expected)) {
@@ -559,6 +568,15 @@ export async function downloadAndExtract(
   const sourceDir = path.join(directory, extractedEntry)
   core.info(`Godot source available at: ${sourceDir}`)
   return sourceDir
+}
+
+/** True when `p` resolves (following symlinks) to a directory. */
+function isDirectory(p: string): boolean {
+  try {
+    return fs.statSync(p).isDirectory()
+  } catch {
+    return false
+  }
 }
 
 /**
@@ -663,11 +681,19 @@ async function runTimeoutCallback(
  * Spawns `command` with `args` in `cwd`, optionally killing it after
  * `timeoutMs` milliseconds (pass 0 for no timeout).
  *
- * Stdio is inherited so SCons output streams directly to the runner log.
- * When a timeout occurs (SIGTERM), the build is treated as success
- * (no fail signal) because the timeout was explicitly configured by the user.
- * This is expected behavior in the CI test matrix and for users who want
- * a hard time limit.
+ * Stdio is inherited so SCons output streams directly to the runner log. On
+ * POSIX the child is started in its own process group so that the timeout
+ * signal reaches SCons' compiler children as well, not just SCons itself.
+ *
+ * Timeout sequence: the `onTimeout` callback runs first (it archives headers
+ * while the build is still in a consistent state), then the process group
+ * receives SIGTERM, and SIGKILL follows after {@link SIGTERM_GRACE_MS} if the
+ * build has not exited by then. A build stopped this way is treated as
+ * success (resolves `true`) because the timeout was explicitly configured.
+ *
+ * A build that exits on its own *before* the kill is requested, including
+ * while `onTimeout` is still running, is judged on its own exit status: a
+ * non-zero exit is a real failure and must not be masked by the timeout.
  *
  * Rejects only on real failures (non-zero exit code or other signals).
  */
@@ -679,44 +705,110 @@ export async function spawnWithTimeout(
   onTimeout?: () => Promise<void>
 ): Promise<boolean> {
   return new Promise((resolve, reject) => {
-    const child = spawn(command, args, { cwd, stdio: 'inherit' })
+    const detached = process.platform !== 'win32'
+    const child = spawn(command, args, { cwd, stdio: 'inherit', detached })
 
     let timer: ReturnType<typeof setTimeout> | undefined = undefined
-    let isTimeout = false
+    let killTimer: ReturnType<typeof setTimeout> | undefined = undefined
+    let killRequested = false
+    let exited = false
+    // Pending onTimeout work; exit handling waits for it so the caller never
+    // observes a half-written header archive.
+    let timeoutWork: Promise<void> | undefined = undefined
+
+    const requestKill = (): void => {
+      if (exited) return
+      killRequested = true
+      signalBuild(child, 'SIGTERM')
+      killTimer = setTimeout(() => {
+        core.warning(
+          `Build did not exit ${SIGTERM_GRACE_MS} ms after SIGTERM; sending SIGKILL.`
+        )
+        signalBuild(child, 'SIGKILL')
+      }, SIGTERM_GRACE_MS)
+    }
 
     if (timeoutMs > 0) {
-      timer = setTimeout(async () => {
-        isTimeout = true
+      timer = setTimeout(() => {
         core.info('Timeout reached. Securing headers before termination...')
-        await runTimeoutCallback(onTimeout)
-        child.kill('SIGTERM')
+        if (onTimeout) {
+          timeoutWork = runTimeoutCallback(onTimeout).then(requestKill)
+        } else {
+          requestKill()
+        }
       }, timeoutMs)
     }
 
     child.on('exit', (code, signal) => {
+      exited = true
       if (timer !== undefined) clearTimeout(timer)
+      if (killTimer !== undefined) clearTimeout(killTimer)
 
-      if (isTimeout || signal === 'SIGTERM') {
-        resolve(true)
-      } else if (signal) {
-        reject(new Error(`Build process killed by signal ${signal}`))
-      } else if (code !== 0) {
-        reject(
-          new Error(
-            `Build exited with code ${code} (${args.slice(0, 2).join(' ')})`
+      const settle = (): void => {
+        if (killRequested || signal === 'SIGTERM') {
+          resolve(true)
+        } else if (signal) {
+          reject(new Error(`Build process killed by signal ${signal}`))
+        } else if (code !== 0) {
+          reject(
+            new Error(`Build exited with code ${code} (${describeBuild(args)})`)
           )
-        )
+        } else {
+          resolve(false)
+        }
+      }
+
+      if (timeoutWork !== undefined) {
+        void timeoutWork.then(settle)
       } else {
-        resolve(false)
+        settle()
       }
     })
 
     child.on('error', (err) => {
       if (timer !== undefined) clearTimeout(timer)
+      if (killTimer !== undefined) clearTimeout(killTimer)
       reject(err)
     })
   })
 }
+
+/**
+ * Sends `signal` to the build. On POSIX the whole process group is signalled
+ * (the child was spawned detached, so its pid is the group id) and SCons'
+ * compiler children stop too; `child.kill` is the fallback when the group is
+ * already gone or the platform has no process groups.
+ */
+function signalBuild(child: ChildProcess, signal: NodeJS.Signals): void {
+  if (child.pid !== undefined && process.platform !== 'win32') {
+    try {
+      process.kill(-child.pid, signal)
+      return
+    } catch {
+      // Group already gone; fall through to the plain kill.
+    }
+  }
+  child.kill(signal)
+}
+
+/**
+ * Names the build in error messages by its platform/target arguments only
+ * (`platform=`, `tools=`, `target=`), so 3.x builds, whose target is the
+ * third argument, are identified as precisely as 4.x builds.
+ */
+function describeBuild(args: string[]): string {
+  return args.filter((a) => /^(platform|tools|target)=/.test(a)).join(' ')
+}
+
+/** File extensions collected by {@link createHeaderArchive}. */
+export const HEADER_EXTENSIONS = [
+  '.glsl',
+  '.h',
+  '.hh',
+  '.hpp',
+  '.inc',
+  '.inl'
+] as const
 
 /**
  * Creates a ZIP archive containing every `*.glsl`, `*.h`, `*.hh`, `*.hpp`,
@@ -729,6 +821,10 @@ export async function spawnWithTimeout(
  * readdir call is a single, atomic syscall on a directory snapshot — there
  * is no async scheduling gap in which the library can lose track of entries.
  *
+ * Symbolic links are followed: a linked header is archived under its link
+ * name and a linked directory is walked. Each real directory is visited once,
+ * so link cycles terminate, and dangling links are skipped.
+ *
  * Returns the absolute path of the created archive.
  */
 export async function createHeaderArchive(sourceDir: string): Promise<string> {
@@ -736,22 +832,33 @@ export async function createHeaderArchive(sourceDir: string): Promise<string> {
   core.info(`Collecting header files from: ${absoluteSource}`)
 
   const headerFiles: string[] = []
+  const visited = new Set<string>()
+
+  const isHeader = (name: string): boolean =>
+    HEADER_EXTENSIONS.some((ext) => name.endsWith(ext))
 
   function walkDir(dir: string): void {
+    const real = fs.realpathSync(dir)
+    if (visited.has(real)) return
+    visited.add(real)
+
     const entries = fs.readdirSync(dir, { withFileTypes: true })
     for (const entry of entries) {
       const fullPath = path.join(dir, entry.name)
-      if (entry.isDirectory()) {
+      let isDir = entry.isDirectory()
+      let isFile = entry.isFile()
+      if (entry.isSymbolicLink()) {
+        try {
+          const target = fs.statSync(fullPath)
+          isDir = target.isDirectory()
+          isFile = target.isFile()
+        } catch {
+          continue // dangling link
+        }
+      }
+      if (isDir) {
         walkDir(fullPath)
-      } else if (
-        entry.isFile() &&
-        (entry.name.endsWith('.glsl') ||
-          entry.name.endsWith('.h') ||
-          entry.name.endsWith('.hh') ||
-          entry.name.endsWith('.hpp') ||
-          entry.name.endsWith('.inc') ||
-          entry.name.endsWith('.inl'))
-      ) {
+      } else if (isFile && isHeader(entry.name)) {
         headerFiles.push(fullPath)
       }
     }

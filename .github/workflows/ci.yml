@@ -225,11 +225,60 @@ jobs:
           fi
           echo "Action failed as expected."
 
+      # Checks the outputs instead of only printing them: the working
+      # directory must exist and contain the extracted source tree; a build
+      # without a timeout must have produced a binary; a requested header
+      # archive must be a non-empty, valid ZIP.
       - name: Verify Output
         if: ${{ matrix.config.expect_failure != true }}
         shell: bash
+        env:
+          BUILD_DIR: ${{ steps.build.outputs.directory }}
+          HEADER_ARCHIVE: ${{ steps.build.outputs.header_archive }}
+          BUILD_TIMEOUT: ${{ matrix.config.timeout || '0' }}
+          BUILD_OPTIONS: ${{ matrix.config.options || '' }}
         run: |
-          echo "Build directory: ${{ steps.build.outputs.directory }}"
-          if [[ "${{ matrix.config.options }}" == *"create_header_archive"* ]]; then
-            echo "Header archive: ${{ steps.build.outputs.header_archive }}"
+          set -euo pipefail
+          echo "Build directory: $BUILD_DIR"
+          [[ -n "$BUILD_DIR" && -d "$BUILD_DIR" ]] \
+            || { echo "::error::directory output is missing or not a directory"; exit 1; }
+
+          source_dirs=("$BUILD_DIR"/godot-*/)
+          [[ ${#source_dirs[@]} -eq 1 && -f "${source_dirs[0]}SConstruct" ]] \
+            || { echo "::error::expected exactly one extracted godot-* source tree in $BUILD_DIR"; ls -la "$BUILD_DIR"; exit 1; }
+          src="${source_dirs[0]}"
+          echo "Source tree: $src"
+
+          if [[ "$BUILD_TIMEOUT" == "0" ]]; then
+            # Untimed builds must finish and leave a binary behind.
+            binaries=("$src"bin/godot.*)
+            [[ -e "${binaries[0]}" ]] \
+              || { echo "::error::no bin/godot.* binary was produced"; ls -la "$src"bin 2>/dev/null; exit 1; }
+            echo "Binaries:"; ls -la "${binaries[@]}"
+          else
+            echo "Timed build (timeout ${BUILD_TIMEOUT}s): only checking that SCons started."
+            # Both majors generate *.gen.h files and object files early on.
+            started=$(find "$src" \( -name '*.gen.h' -o -name '*.o' -o -name '*.obj' \) -print -quit)
+            [[ -n "$started" ]] \
+              || { echo "::error::SCons does not appear to have started in $src"; exit 1; }
+            echo "SCons started (found $started)."
+          fi
+
+          if [[ "$BUILD_OPTIONS" == *create_header_archive* ]]; then
+            echo "Header archive: $HEADER_ARCHIVE"
+            [[ -n "$HEADER_ARCHIVE" && -s "$HEADER_ARCHIVE" ]] \
+              || { echo "::error::header_archive output is missing or empty"; exit 1; }
+            python3 - "$HEADER_ARCHIVE" <<'PY'
+          import sys, zipfile
+          with zipfile.ZipFile(sys.argv[1]) as z:
+              bad = z.testzip()
+              names = z.namelist()
+          assert bad is None, f"corrupt entry: {bad}"
+          assert names, "archive is empty"
+          assert all(n.endswith(('.glsl', '.h', '.hh', '.hpp', '.inc', '.inl')) for n in names), "non-header entry in archive"
+          print(f"Header archive OK: {len(names)} entries")
+          PY
+          else
+            [[ -z "$HEADER_ARCHIVE" ]] \
+              || { echo "::error::header_archive was set without create_header_archive"; exit 1; }
           fi
