@@ -154,6 +154,9 @@ describe('main.ts – happy path', () => {
       'header_archive',
       '/tmp/godot-headers-1234.zip'
     )
+    expect(core.info).toHaveBeenCalledWith(
+      'Header archive secured: /tmp/godot-headers-1234.zip'
+    )
   })
 
   it('creates a temp directory when no directory input is given', async () => {
@@ -203,6 +206,19 @@ describe('main.ts – happy path', () => {
     await run()
 
     expect(godot.runBuild.mock.calls[0][3]).toBe('x86_64')
+  })
+
+  it('does not create the working directory when it already exists', async () => {
+    fsExistsSync.mockReturnValue(true)
+    setInputs({ directory: '/custom/build/dir' })
+
+    await run()
+
+    expect(fsExistsSync).toHaveBeenCalledWith('/custom/build/dir')
+    expect(fsMkdirSync).not.toHaveBeenCalled()
+    expect(core.info).toHaveBeenCalledWith(
+      'Working directory (absolute): /custom/build/dir'
+    )
   })
 
   it('creates the working directory if it does not exist', async () => {
@@ -415,7 +431,9 @@ describe('main.ts – Godot 3.x', () => {
       await run()
 
       expect(core.warning).toHaveBeenCalledWith(
-        expect.stringContaining(`Godot ${version} is older than 3.5`)
+        `Godot ${version} is older than 3.5, the oldest 3.x release this ` +
+          `action is tested with. The build may fail with the toolchains ` +
+          `available on current runners.`
       )
       expect(core.setFailed).not.toHaveBeenCalled()
       expect(godot.runBuild).toHaveBeenCalled()
@@ -464,6 +482,30 @@ describe('main.ts – Godot 3.x', () => {
 // ── Validation error tests ────────────────────────────────────────────────────
 
 describe('main.ts – input validation', () => {
+  it.each([
+    [
+      { platform: 'dos' },
+      'Invalid platform: "dos". Must be one of: android, ios, linuxbsd, macos, web, windows.'
+    ],
+    [
+      { target: 'Editor' },
+      'Invalid target: "Editor". Must be one of: editor, template_debug, template_release.'
+    ],
+    [
+      { architecture: 'mips' },
+      'Invalid architecture: "mips". Must be one of: auto, x86_32, x86_64, arm32, arm64, rv64, ppc32, ppc64, wasm32.'
+    ]
+  ])(
+    'reports the full list of valid values for %j',
+    async (overrides, message) => {
+      setInputs(overrides)
+
+      await run()
+
+      expect(core.setFailed).toHaveBeenCalledWith(message)
+    }
+  )
+
   it.each([
     [{ version: '2.1.6' }, 'Unsupported Godot major version: 2'],
     [{ version: '5.0' }, 'Unsupported Godot major version: 5'],
