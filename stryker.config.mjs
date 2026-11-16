@@ -1,7 +1,7 @@
 /**
  * © 2026-present Action Commons (https://github.com/ActionCommons)
  *
- * Mutation testing for the pure and side-effectful helpers in src/godot.ts.
+ * Mutation testing for src/godot.ts and src/main.ts.
  * Line/branch coverage is already 100%; the mutation score shows whether the
  * tests would actually notice a behavioural change.
  *
@@ -17,7 +17,7 @@ export default {
   },
   // Jest runs in ESM mode, which requires the VM-modules flag in each worker.
   testRunnerNodeArgs: ['--experimental-vm-modules', '--no-warnings'],
-  mutate: ['src/godot.ts'],
+  mutate: ['src/godot.ts', 'src/main.ts'],
   // Coverage thresholds are enforced by `npm test`, not per mutant run.
   disableTypeChecks: true,
   coverageAnalysis: 'perTest',

@@ -38,10 +38,11 @@ inputs:
   timeout:
     description: >
       Wall-clock timeout in seconds for the whole build (all platform - target
-      combinations together), after which the running SCons process is
-      terminated and remaining combinations are skipped. Must be a plain
-      non-negative integer no larger than 2147483. Set to 0 (or leave empty) for
-      no timeout.
+      combinations together). When reached, the header archive (if requested) is
+      written, the running SCons process group is sent SIGTERM (SIGKILL after 10
+      seconds) and remaining combinations are skipped; the step succeeds. Must
+      be a plain non-negative integer no larger than 2147483. Set to 0 (or leave
+      empty) for no timeout.
     required: false
     default: '0'
 

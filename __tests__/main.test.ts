@@ -9,6 +9,7 @@
  */
 
 import { jest } from '@jest/globals'
+import * as path from 'node:path'
 import * as core from '../__fixtures__/core.js'
 import * as godot from '../__fixtures__/godot.js'
 
@@ -153,6 +154,9 @@ describe('main.ts – happy path', () => {
       'header_archive',
       '/tmp/godot-headers-1234.zip'
     )
+    expect(core.info).toHaveBeenCalledWith(
+      'Header archive secured: /tmp/godot-headers-1234.zip'
+    )
   })
 
   it('creates a temp directory when no directory input is given', async () => {
@@ -204,6 +208,19 @@ describe('main.ts – happy path', () => {
     expect(godot.runBuild.mock.calls[0][3]).toBe('x86_64')
   })
 
+  it('does not create the working directory when it already exists', async () => {
+    fsExistsSync.mockReturnValue(true)
+    setInputs({ directory: '/custom/build/dir' })
+
+    await run()
+
+    expect(fsExistsSync).toHaveBeenCalledWith('/custom/build/dir')
+    expect(fsMkdirSync).not.toHaveBeenCalled()
+    expect(core.info).toHaveBeenCalledWith(
+      'Working directory (absolute): /custom/build/dir'
+    )
+  })
+
   it('creates the working directory if it does not exist', async () => {
     fsExistsSync.mockReturnValue(false)
     setInputs({ directory: '/custom/build/dir' })
@@ -252,6 +269,50 @@ describe('main.ts – happy path', () => {
     await run()
 
     expect(core.warning).not.toHaveBeenCalled()
+  })
+
+  it.each(['3.5', '3.5.3'])(
+    'does not warn for %s, the oldest tested 3.x minor (boundary)',
+    async (version) => {
+      setInputs({ version })
+
+      await run()
+
+      expect(core.warning).not.toHaveBeenCalled()
+      expect(core.setFailed).not.toHaveBeenCalled()
+    }
+  )
+
+  it('marks version, platform and target as required inputs', async () => {
+    await run()
+
+    for (const name of ['version', 'platform', 'target']) {
+      expect(core.getInput).toHaveBeenCalledWith(name, { required: true })
+    }
+    for (const name of [
+      'flavor',
+      'directory',
+      'timeout',
+      'architecture',
+      'options'
+    ]) {
+      expect(core.getInput).toHaveBeenCalledWith(name)
+    }
+  })
+
+  it('resolves a relative directory input against the current working directory', async () => {
+    setInputs({ directory: './custom_godot_source' })
+    const expected = path.resolve('./custom_godot_source')
+
+    await run()
+
+    expect(core.setOutput).toHaveBeenCalledWith('directory', expected)
+    expect(godot.downloadAndExtract).toHaveBeenCalledWith(
+      '4.4',
+      'stable',
+      expected
+    )
+    expect(fsMkdtempSync).not.toHaveBeenCalled()
   })
 })
 
@@ -370,7 +431,9 @@ describe('main.ts – Godot 3.x', () => {
       await run()
 
       expect(core.warning).toHaveBeenCalledWith(
-        expect.stringContaining(`Godot ${version} is older than 3.5`)
+        `Godot ${version} is older than 3.5, the oldest 3.x release this ` +
+          `action is tested with. The build may fail with the toolchains ` +
+          `available on current runners.`
       )
       expect(core.setFailed).not.toHaveBeenCalled()
       expect(godot.runBuild).toHaveBeenCalled()
@@ -419,6 +482,30 @@ describe('main.ts – Godot 3.x', () => {
 // ── Validation error tests ────────────────────────────────────────────────────
 
 describe('main.ts – input validation', () => {
+  it.each([
+    [
+      { platform: 'dos' },
+      'Invalid platform: "dos". Must be one of: android, ios, linuxbsd, macos, web, windows.'
+    ],
+    [
+      { target: 'Editor' },
+      'Invalid target: "Editor". Must be one of: editor, template_debug, template_release.'
+    ],
+    [
+      { architecture: 'mips' },
+      'Invalid architecture: "mips". Must be one of: auto, x86_32, x86_64, arm32, arm64, rv64, ppc32, ppc64, wasm32.'
+    ]
+  ])(
+    'reports the full list of valid values for %j',
+    async (overrides, message) => {
+      setInputs(overrides)
+
+      await run()
+
+      expect(core.setFailed).toHaveBeenCalledWith(message)
+    }
+  )
+
   it.each([
     [{ version: '2.1.6' }, 'Unsupported Godot major version: 2'],
     [{ version: '5.0' }, 'Unsupported Godot major version: 5'],
@@ -598,6 +685,20 @@ describe('main.ts – error propagation', () => {
     await run()
 
     expect(core.setFailed).toHaveBeenCalledWith('network error')
+  })
+
+  it('still exposes the directory output when the download fails', async () => {
+    // The working directory exists at that point, so later steps can inspect
+    // or clean it; the output is set before the download starts.
+    godot.downloadAndExtract.mockRejectedValue(new Error('network error'))
+
+    await run()
+
+    expect(core.setOutput).toHaveBeenCalledWith('directory', '/work')
+    expect(core.setOutput).not.toHaveBeenCalledWith(
+      'header_archive',
+      expect.anything()
+    )
   })
 
   it('calls setFailed when setupScons throws', async () => {
